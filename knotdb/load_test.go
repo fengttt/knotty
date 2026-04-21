@@ -17,20 +17,33 @@ const (
 	testDbRel  = "../dataset/knotty.sqlite3"
 )
 
+// useTestDB redirects knotdb to the test sqlite file for the duration of t.
+func useTestDB(t *testing.T) string {
+	t.Helper()
+	dbPath, err := filepath.Abs(testDbRel)
+	if err != nil {
+		t.Fatalf("abs db: %v", err)
+	}
+	prev := Path()
+	SetPath(dbPath)
+	t.Cleanup(func() {
+		_ = Close()
+		SetPath(prev)
+	})
+	return dbPath
+}
+
 func TestLoadKnotInfo(t *testing.T) {
 	xlsPath, err := filepath.Abs(testXlsRel)
 	if err != nil {
 		t.Fatalf("abs xls: %v", err)
 	}
-	dbPath, err := filepath.Abs(testDbRel)
-	if err != nil {
-		t.Fatalf("abs db: %v", err)
-	}
 	if _, err := os.Stat(xlsPath); err != nil {
 		t.Skipf("xls not available at %s: %v", xlsPath, err)
 	}
+	dbPath := useTestDB(t)
 
-	n, err := LoadKnotInfo(xlsPath, dbPath)
+	n, err := LoadKnotInfo(xlsPath)
 	if err != nil {
 		t.Fatalf("LoadKnotInfo: %v", err)
 	}
@@ -45,10 +58,7 @@ func TestLoadKnotInfo(t *testing.T) {
 }
 
 func TestCheckLoadKnotInfo(t *testing.T) {
-	dbPath, err := filepath.Abs(testDbRel)
-	if err != nil {
-		t.Fatalf("abs db: %v", err)
-	}
+	dbPath := useTestDB(t)
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
 	}
@@ -71,7 +81,6 @@ func TestCheckLoadKnotInfo(t *testing.T) {
 	crossingCol := findCrossingColumn(t, db)
 	t.Logf("using crossing column: %q", crossingCol)
 
-	// Group by crossing number and report counts. Sort numerically when possible.
 	q := `SELECT ` + quoteIdent(crossingCol) + `, COUNT(*) FROM "` + KnotInfoTable +
 		`" GROUP BY ` + quoteIdent(crossingCol)
 	rows, err := db.Query(q)
@@ -114,15 +123,12 @@ func TestCheckLoadKnotInfo(t *testing.T) {
 }
 
 func TestKnotInfoColumns(t *testing.T) {
-	dbPath, err := filepath.Abs(testDbRel)
-	if err != nil {
-		t.Fatalf("abs db: %v", err)
-	}
+	dbPath := useTestDB(t)
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
 	}
 
-	cols, err := KnotInfoColumns(dbPath)
+	cols, err := KnotInfoColumns()
 	if err != nil {
 		t.Fatalf("KnotInfoColumns: %v", err)
 	}
@@ -131,12 +137,10 @@ func TestKnotInfoColumns(t *testing.T) {
 	}
 	t.Logf("got %d columns", len(cols))
 
-	// First column is the knot's short name.
 	if cols[0] != "name" {
 		t.Errorf("expected first column %q, got %q", "name", cols[0])
 	}
 
-	// A handful of well-known KnotInfo properties must be present.
 	want := []string{"crossing_number", "jones_polynomial", "signature", "determinant"}
 	have := make(map[string]bool, len(cols))
 	for _, c := range cols {

@@ -14,7 +14,7 @@ const testDatasetDirRel = "../dataset"
 
 func TestLoadKnotImg(t *testing.T) {
 	datasetDir, _ := filepath.Abs(testDatasetDirRel)
-	dbPath, _ := filepath.Abs(testDbRel)
+	dbPath := useTestDB(t)
 
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Skipf("db not loaded yet at %s (run TestLoadKnotInfo first): %v", dbPath, err)
@@ -23,7 +23,7 @@ func TestLoadKnotImg(t *testing.T) {
 		t.Skipf("diagrams dir missing: %v", err)
 	}
 
-	n, err := LoadKnotImages(datasetDir, dbPath)
+	n, err := LoadKnotImages(datasetDir)
 	if err != nil {
 		t.Fatalf("LoadKnotImages: %v", err)
 	}
@@ -32,7 +32,6 @@ func TestLoadKnotImg(t *testing.T) {
 	}
 	t.Logf("loaded images for %d knots", n)
 
-	// Expected count: all knots in knot_info with crossing <= MaxImageCrossing.
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -50,7 +49,7 @@ func TestLoadKnotImg(t *testing.T) {
 
 func TestCheckKnotImage(t *testing.T) {
 	datasetDir, _ := filepath.Abs(testDatasetDirRel)
-	dbPath, _ := filepath.Abs(testDbRel)
+	dbPath := useTestDB(t)
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Skipf("db not loaded: %v", err)
 	}
@@ -61,7 +60,6 @@ func TestCheckKnotImage(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Report totals.
 	var total int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM "` + KnotImgTable + `"`).Scan(&total); err != nil {
 		t.Fatalf("count: %v", err)
@@ -95,7 +93,6 @@ func TestCheckKnotImage(t *testing.T) {
 		t.Logf("%-16s %10d %15d", s.col, s.present, s.bytes)
 	}
 
-	// Randomly sample rows and verify each BLOB matches the source file.
 	sampleSize := 10
 	names := loadSampleNames(t, db, sampleSize)
 	if len(names) == 0 {
@@ -127,13 +124,11 @@ func TestCheckKnotImage(t *testing.T) {
 			path := c.path(name)
 			fileData, ferr := os.ReadFile(path)
 			if ferr != nil {
-				// No file on disk -> blob must be NULL/empty.
 				if len(blob) != 0 {
 					t.Errorf("%s %s: db has %d bytes but file missing (%v)", name, c.col, len(blob), ferr)
 				}
 				continue
 			}
-			// File exists -> blob must match bytes.
 			if !bytes.Equal(blob, fileData) {
 				t.Errorf("%s %s: blob (%d bytes, sha=%x) != file (%d bytes, sha=%x)",
 					name, c.col, len(blob), sha256.Sum256(blob), len(fileData), sha256.Sum256(fileData))

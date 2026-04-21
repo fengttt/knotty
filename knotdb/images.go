@@ -40,23 +40,23 @@ func (l imageLayout) gridPath(name string) string {
 	return filepath.Join(l.datasetDir, "GridDiagramSVG_D", "grid"+name+".svg")
 }
 
-// LoadKnotImages iterates the knot_info table for knots with crossing number
-// <= MaxImageCrossing, reads each knot's five image files from datasetDir,
-// and loads them into knot_img. The table is dropped and recreated. Missing
-// files are stored as NULL. Returns the number of rows inserted.
-func LoadKnotImages(datasetDir, dbPath string) (int, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return 0, fmt.Errorf("open sqlite %s: %w", dbPath, err)
-	}
-	defer db.Close()
-
-	names, err := selectKnotNamesUpTo(db, MaxImageCrossing)
+// LoadKnotImages iterates the knot_info table in the current sqlite database
+// (see SetPath) for knots with crossing number <= MaxImageCrossing, reads
+// each knot's five image files from datasetDir, and loads them into knot_img.
+// The table is dropped and recreated. Missing files are stored as NULL.
+// Returns the number of rows inserted.
+func LoadKnotImages(datasetDir string) (int, error) {
+	h, err := db()
 	if err != nil {
 		return 0, err
 	}
 
-	if _, err := db.Exec("DROP TABLE IF EXISTS " + KnotImgTable); err != nil {
+	names, err := selectKnotNamesUpTo(h, MaxImageCrossing)
+	if err != nil {
+		return 0, err
+	}
+
+	if _, err := h.Exec("DROP TABLE IF EXISTS " + KnotImgTable); err != nil {
 		return 0, fmt.Errorf("drop table: %w", err)
 	}
 	createSQL := `CREATE TABLE "` + KnotImgTable + `" (
@@ -67,11 +67,11 @@ func LoadKnotImages(datasetDir, dbPath string) (int, error) {
 		snappy_mirror BLOB,
 		grid BLOB
 	)`
-	if _, err := db.Exec(createSQL); err != nil {
+	if _, err := h.Exec(createSQL); err != nil {
 		return 0, fmt.Errorf("create table: %w", err)
 	}
 
-	tx, err := db.Begin()
+	tx, err := h.Begin()
 	if err != nil {
 		return 0, err
 	}
@@ -133,8 +133,8 @@ func LoadKnotImages(datasetDir, dbPath string) (int, error) {
 
 // selectKnotNamesUpTo returns names of knots with crossing number <= max,
 // in knot_info insertion order.
-func selectKnotNamesUpTo(db *sql.DB, max int) ([]string, error) {
-	rows, err := db.Query(`SELECT name, crossing_number FROM "` + KnotInfoTable + `"`)
+func selectKnotNamesUpTo(h *sql.DB, max int) ([]string, error) {
+	rows, err := h.Query(`SELECT name, crossing_number FROM "` + KnotInfoTable + `"`)
 	if err != nil {
 		return nil, fmt.Errorf("select knot names: %w", err)
 	}

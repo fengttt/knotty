@@ -1,7 +1,6 @@
 package knotdb
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -12,34 +11,33 @@ import (
 // KnotInfoTable is the name of the table populated by LoadKnotInfo.
 const KnotInfoTable = "knot_info"
 
-// LoadKnotInfo reads the KnotInfo xls spreadsheet at xlsPath, opens or creates
-// a sqlite database at dbPath, drops and recreates the knot_info table, and
-// loads every data row into it.
+// LoadKnotInfo reads the KnotInfo xls spreadsheet at xlsPath, drops and
+// recreates the knot_info table in the current sqlite database (see SetPath),
+// and loads every data row into it.
 //
 // The spreadsheet pairs each property with a description/note column; only the
 // first column of each pair is loaded, using the spreadsheet's header text as
 // the SQL column name. All columns are TEXT. Returns the number of data rows
 // inserted.
-func LoadKnotInfo(xlsPath, dbPath string) (int, error) {
+func LoadKnotInfo(xlsPath string) (int, error) {
 	headers, data, err := readKnotInfoXLS(xlsPath)
 	if err != nil {
 		return 0, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	h, err := db()
 	if err != nil {
-		return 0, fmt.Errorf("open sqlite %s: %w", dbPath, err)
+		return 0, err
 	}
-	defer db.Close()
 
-	if _, err := db.Exec("DROP TABLE IF EXISTS " + KnotInfoTable); err != nil {
+	if _, err := h.Exec("DROP TABLE IF EXISTS " + KnotInfoTable); err != nil {
 		return 0, fmt.Errorf("drop table: %w", err)
 	}
-	if _, err := db.Exec(createTableStmt(KnotInfoTable, headers)); err != nil {
+	if _, err := h.Exec(createTableStmt(KnotInfoTable, headers)); err != nil {
 		return 0, fmt.Errorf("create table: %w", err)
 	}
 
-	tx, err := db.Begin()
+	tx, err := h.Begin()
 	if err != nil {
 		return 0, err
 	}
@@ -204,15 +202,13 @@ func quoteIdent(name string) string {
 }
 
 // KnotInfoColumns returns the column names of the knot_info table in the
-// sqlite database at dbPath, in the order they were defined.
-func KnotInfoColumns(dbPath string) ([]string, error) {
-	db, err := sql.Open("sqlite", dbPath)
+// current sqlite database (see SetPath), in declaration order.
+func KnotInfoColumns() ([]string, error) {
+	h, err := db()
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
+		return nil, err
 	}
-	defer db.Close()
-
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, KnotInfoTable)
+	rows, err := h.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, KnotInfoTable)
 	if err != nil {
 		return nil, fmt.Errorf("table_info: %w", err)
 	}
