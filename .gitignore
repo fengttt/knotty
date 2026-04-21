@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Dataset working dir (large extracted archives; source archives are tracked via LFS)
+dataset/
+
 # Editor/IDE
 # .idea/
 # .vscode/
