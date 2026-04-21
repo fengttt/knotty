@@ -202,3 +202,35 @@ func insertStmt(table string, headers []string) string {
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
+
+// KnotInfoColumns returns the column names of the knot_info table in the
+// sqlite database at dbPath, in the order they were defined.
+func KnotInfoColumns(dbPath string) ([]string, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, KnotInfoTable)
+	if err != nil {
+		return nil, fmt.Errorf("table_info: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("table %s has no columns (does it exist?)", KnotInfoTable)
+	}
+	return cols, nil
+}

@@ -113,6 +113,42 @@ func TestCheckLoadKnotInfo(t *testing.T) {
 	}
 }
 
+func TestKnotInfoColumns(t *testing.T) {
+	dbPath, err := filepath.Abs(testDbRel)
+	if err != nil {
+		t.Fatalf("abs db: %v", err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	}
+
+	cols, err := KnotInfoColumns(dbPath)
+	if err != nil {
+		t.Fatalf("KnotInfoColumns: %v", err)
+	}
+	if len(cols) == 0 {
+		t.Fatalf("no columns returned")
+	}
+	t.Logf("got %d columns", len(cols))
+
+	// First column is the knot's short name.
+	if cols[0] != "name" {
+		t.Errorf("expected first column %q, got %q", "name", cols[0])
+	}
+
+	// A handful of well-known KnotInfo properties must be present.
+	want := []string{"crossing_number", "jones_polynomial", "signature", "determinant"}
+	have := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		have[c] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("missing expected column %q", w)
+		}
+	}
+}
+
 // findCrossingColumn looks up the column whose name contains "crossing" (and
 // prefers one that also mentions "number").
 func findCrossingColumn(t *testing.T, db *sql.DB) string {
