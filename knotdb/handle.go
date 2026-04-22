@@ -13,8 +13,9 @@ var (
 	dirMu  sync.Mutex
 	curDir = resolveDefaultDir()
 
-	infoMu  sync.Mutex
-	curInfo *knotInfo
+	infoMu       sync.Mutex
+	curInfo      *knotInfo
+	curInfoSmall *knotInfo
 )
 
 func resolveDefaultDir() string {
@@ -45,15 +46,16 @@ func Dir() string {
 	return curDir
 }
 
-// Reset clears the in-memory knot_info cache, if any. The next lookup
-// will reload knot_info.json from disk.
+// Reset clears the in-memory knot_info caches, if any. The next lookup
+// will reload from disk.
 func Reset() {
 	infoMu.Lock()
 	defer infoMu.Unlock()
 	curInfo = nil
+	curInfoSmall = nil
 }
 
-// info returns the lazily-loaded knot_info for the current dataset dir.
+// info returns the lazily-loaded full knot_info for the current dataset dir.
 func info() (*knotInfo, error) {
 	infoMu.Lock()
 	defer infoMu.Unlock()
@@ -65,5 +67,21 @@ func info() (*knotInfo, error) {
 		return nil, err
 	}
 	curInfo = ki
+	return ki, nil
+}
+
+// infoSmall returns the lazily-loaded small knot_info for the current
+// dataset dir.
+func infoSmall() (*knotInfo, error) {
+	infoMu.Lock()
+	defer infoMu.Unlock()
+	if curInfoSmall != nil {
+		return curInfoSmall, nil
+	}
+	ki, err := loadKnotInfoSmallJSON(Dir())
+	if err != nil {
+		return nil, err
+	}
+	curInfoSmall = ki
 	return ki, nil
 }

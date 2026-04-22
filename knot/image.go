@@ -12,11 +12,11 @@ import (
 type ImageType int
 
 const (
-	Diagram ImageType = iota
-	DiagramMirror
-	Snappy
-	SnappyMirror
-	Grid
+	StyleDiagram ImageType = iota
+	StyleDiagramMirror
+	StyleSnappy
+	StyleSnappyMirror
+	StyleGrid
 )
 
 // ImageKind is the file format of an image: PNG for rasterized diagrams,
@@ -31,15 +31,15 @@ const (
 // Column returns the knot_img column name that stores this ImageType.
 func (t ImageType) Column() string {
 	switch t {
-	case Diagram:
+	case StyleDiagram:
 		return "diagram"
-	case DiagramMirror:
+	case StyleDiagramMirror:
 		return "diagram_mirror"
-	case Snappy:
+	case StyleSnappy:
 		return "snappy"
-	case SnappyMirror:
+	case StyleSnappyMirror:
 		return "snappy_mirror"
-	case Grid:
+	case StyleGrid:
 		return "grid"
 	}
 	return ""
@@ -48,7 +48,7 @@ func (t ImageType) Column() string {
 // Kind returns the file format of this image. All diagrams are PNG except
 // Grid, which is SVG.
 func (t ImageType) Kind() ImageKind {
-	if t == Grid {
+	if t == StyleGrid {
 		return SVG
 	}
 	return PNG
@@ -56,33 +56,33 @@ func (t ImageType) Kind() ImageKind {
 
 func (t ImageType) String() string {
 	switch t {
-	case Diagram:
+	case StyleDiagram:
 		return "Diagram"
-	case DiagramMirror:
+	case StyleDiagramMirror:
 		return "DiagramMirror"
-	case Snappy:
+	case StyleSnappy:
 		return "Snappy"
-	case SnappyMirror:
+	case StyleSnappyMirror:
 		return "SnappyMirror"
-	case Grid:
+	case StyleGrid:
 		return "Grid"
 	}
 	return fmt.Sprintf("ImageType(%d)", int(t))
 }
 
 // LoadImage reads the raw bytes of this knot's image of type t from the
-// current knot_img table (see knotdb.SetPath). Returns (nil, kind, nil) if
-// the knot has no stored image of this type (for example, the unknot has
-// no images).
-func (k *Knot) LoadImage(t ImageType) ([]byte, ImageKind, error) {
+// current knot_img table (see knotdb.SetDir). Returns (nil, kind, nil)
+// if the knot has no stored image of this type (for example, the unknot
+// has no images).
+func (d *Diagram) LoadImage(t ImageType) ([]byte, ImageKind, error) {
 	col := t.Column()
 	if col == "" {
 		return nil, "", fmt.Errorf("unknown ImageType %d", int(t))
 	}
-	if k.name == "" {
+	if d.name == "" {
 		return nil, t.Kind(), fmt.Errorf("knot has no name; cannot load image")
 	}
-	data, err := knotdb.LoadImageBlob(k.name, col)
+	data, err := knotdb.LoadImageBlob(d.name, col)
 	if err != nil {
 		return nil, t.Kind(), err
 	}

@@ -11,7 +11,7 @@ import (
 
 const (
 	testDatasetRel = "../dataset"
-	testJSONRel    = "../dataset/knot_info.json"
+	testSmallRel   = "../dataset/knot_info_small.json.zip"
 )
 
 // useTestDir redirects knotdb to the test dataset directory for t.
@@ -21,12 +21,12 @@ func useTestDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("abs dir: %v", err)
 	}
-	jp, err := filepath.Abs(testJSONRel)
+	sp, err := filepath.Abs(testSmallRel)
 	if err != nil {
-		t.Fatalf("abs json: %v", err)
+		t.Fatalf("abs small zip: %v", err)
 	}
-	if _, err := os.Stat(jp); err != nil {
-		t.Skipf("knot_info.json not built at %s: %v", jp, err)
+	if _, err := os.Stat(sp); err != nil {
+		t.Skipf("%s not built at %s: %v", knotdb.KnotInfoSmallFile, sp, err)
 	}
 	prev := knotdb.Dir()
 	knotdb.SetDir(dir)
@@ -49,20 +49,23 @@ func TestFindKnotByName(t *testing.T) {
 	if got := k.GetCrossingNumber(); got != 4 {
 		t.Errorf("crossing_number = %d", got)
 	}
-	if got := k.GetSignature(); got != 0 {
-		t.Errorf("signature = %d (want 0 for 4_1)", got)
+	if got := k.GetUnknottingNumber(); got != 1 {
+		t.Errorf("unknotting_number = %d", got)
 	}
-	if got := k.GetDeterminant(); got != 5 {
-		t.Errorf("determinant = %d (want 5)", got)
-	}
-	if got := k.GetAlternating(); got != "Y" {
-		t.Errorf("alternating = %q", got)
+	if got := k.GetBridgeIndex(); got != 2 {
+		t.Errorf("bridge_index = %d", got)
 	}
 	if got := k.GetJonesPolynomial(); got == "" {
 		t.Error("jones_polynomial should be non-empty for 4_1")
 	}
+	if got := k.GetSymmetryType(); got == "" {
+		t.Error("symmetry_type should be non-empty for 4_1")
+	}
 	if pd := k.GetPdNotation(); len(pd) == 0 {
 		t.Error("pd_notation should be non-empty for 4_1")
+	}
+	if got := k.GetComponent(); got != 1 {
+		t.Errorf("component = %d, want 1", got)
 	}
 }
 
@@ -76,11 +79,8 @@ func TestFindKnotByNameTrefoil(t *testing.T) {
 	if got := k.GetCrossingNumber(); got != 3 {
 		t.Errorf("crossing_number = %d", got)
 	}
-	if got := k.GetSignature(); got != -2 {
-		t.Errorf("signature = %d", got)
-	}
-	if got := k.GetDeterminant(); got != 3 {
-		t.Errorf("determinant = %d", got)
+	if got := k.GetBridgeIndex(); got != 2 {
+		t.Errorf("bridge_index = %d", got)
 	}
 	want := []int8{1, -2, 3, -1, 2, -3}
 	if got := k.GetGaussNotation(); !equalInt8(got, want) {
@@ -105,7 +105,7 @@ func TestLoadImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindKnotByName(0_1): %v", err)
 	}
-	data, kind, err := unknot.LoadImage(Diagram)
+	data, kind, err := unknot.LoadImage(StyleDiagram)
 	if err != nil {
 		t.Fatalf("LoadImage(0_1, Diagram): %v", err)
 	}
@@ -120,7 +120,7 @@ func TestLoadImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindKnotByName(3_1): %v", err)
 	}
-	for _, ty := range []ImageType{Diagram, DiagramMirror, Snappy, SnappyMirror, Grid} {
+	for _, ty := range []ImageType{StyleDiagram, StyleDiagramMirror, StyleSnappy, StyleSnappyMirror, StyleGrid} {
 		data, kind, err := tre.LoadImage(ty)
 		if err != nil {
 			t.Fatalf("LoadImage(3_1, %s): %v", ty, err)
@@ -130,7 +130,7 @@ func TestLoadImage(t *testing.T) {
 		}
 		wantKind := PNG
 		var wantMagic []byte
-		if ty == Grid {
+		if ty == StyleGrid {
 			wantKind = SVG
 			wantMagic = []byte("<?xml")
 		} else {
@@ -144,7 +144,7 @@ func TestLoadImage(t *testing.T) {
 		}
 		for i, b := range wantMagic {
 			if data[i] != b {
-				if ty == Grid {
+				if ty == StyleGrid {
 					break
 				}
 				t.Errorf("3_1 %s: byte %d = %#x, want %#x", ty, i, data[i], b)

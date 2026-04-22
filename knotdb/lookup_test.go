@@ -7,25 +7,66 @@ import (
 	"testing"
 )
 
-func jsonPath(t *testing.T) string {
+func smallZipPath(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join(testDatasetRel, KnotInfoSmallFile))
+	if err != nil {
+		t.Fatalf("abs small zip: %v", err)
+	}
+	return p
+}
+
+func fullZipPath(t *testing.T) string {
 	t.Helper()
 	p, err := filepath.Abs(filepath.Join(testDatasetRel, KnotInfoFile))
 	if err != nil {
-		t.Fatalf("abs json: %v", err)
+		t.Fatalf("abs full zip: %v", err)
 	}
 	return p
 }
 
 func TestFindKnotRow(t *testing.T) {
-	jp := jsonPath(t)
-	if _, err := os.Stat(jp); err != nil {
-		t.Skipf("%s not built yet: %v", jp, err)
+	sp := smallZipPath(t)
+	if _, err := os.Stat(sp); err != nil {
+		t.Skipf("%s not built yet: %v", sp, err)
 	}
 	useTestDir(t)
 
 	cols, vals, err := FindKnotRow("4_1")
 	if err != nil {
 		t.Fatalf("FindKnotRow(4_1): %v", err)
+	}
+	if len(cols) != len(vals) {
+		t.Fatalf("len(cols)=%d != len(vals)=%d", len(cols), len(vals))
+	}
+	if len(cols) != len(SmallColumns) {
+		t.Fatalf("small row has %d cols, want %d", len(cols), len(SmallColumns))
+	}
+	idx := -1
+	for i, c := range cols {
+		if c == "name" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("no name column")
+	}
+	if vals[idx] != "4_1" {
+		t.Errorf("name = %q, want %q", vals[idx], "4_1")
+	}
+}
+
+func TestFindKnotRowFull(t *testing.T) {
+	fp := fullZipPath(t)
+	if _, err := os.Stat(fp); err != nil {
+		t.Skipf("%s not built yet: %v", fp, err)
+	}
+	useTestDir(t)
+
+	cols, vals, err := FindKnotRowFull("4_1")
+	if err != nil {
+		t.Fatalf("FindKnotRowFull(4_1): %v", err)
 	}
 	if len(cols) != len(vals) {
 		t.Fatalf("len(cols)=%d != len(vals)=%d", len(cols), len(vals))
@@ -46,9 +87,9 @@ func TestFindKnotRow(t *testing.T) {
 }
 
 func TestFindKnotRowMissing(t *testing.T) {
-	jp := jsonPath(t)
-	if _, err := os.Stat(jp); err != nil {
-		t.Skipf("%s not built yet: %v", jp, err)
+	sp := smallZipPath(t)
+	if _, err := os.Stat(sp); err != nil {
+		t.Skipf("%s not built yet: %v", sp, err)
 	}
 	useTestDir(t)
 
@@ -59,9 +100,9 @@ func TestFindKnotRowMissing(t *testing.T) {
 }
 
 func TestRandomKnotName(t *testing.T) {
-	jp := jsonPath(t)
-	if _, err := os.Stat(jp); err != nil {
-		t.Skipf("%s not built yet: %v", jp, err)
+	sp := smallZipPath(t)
+	if _, err := os.Stat(sp); err != nil {
+		t.Skipf("%s not built yet: %v", sp, err)
 	}
 	useTestDir(t)
 
@@ -82,15 +123,27 @@ func TestRandomKnotName(t *testing.T) {
 }
 
 func TestKnotInfoColumns(t *testing.T) {
-	jp := jsonPath(t)
-	if _, err := os.Stat(jp); err != nil {
-		t.Skipf("%s not built yet: %v", jp, err)
+	cols := KnotInfoColumns()
+	if len(cols) != len(SmallColumns) {
+		t.Fatalf("KnotInfoColumns len = %d, want %d", len(cols), len(SmallColumns))
+	}
+	for i, c := range cols {
+		if c != SmallColumns[i] {
+			t.Errorf("cols[%d] = %q, want %q", i, c, SmallColumns[i])
+		}
+	}
+}
+
+func TestKnotInfoColumnsFull(t *testing.T) {
+	fp := fullZipPath(t)
+	if _, err := os.Stat(fp); err != nil {
+		t.Skipf("%s not built yet: %v", fp, err)
 	}
 	useTestDir(t)
 
-	cols, err := KnotInfoColumns()
+	cols, err := KnotInfoColumnsFull()
 	if err != nil {
-		t.Fatalf("KnotInfoColumns: %v", err)
+		t.Fatalf("KnotInfoColumnsFull: %v", err)
 	}
 	if len(cols) == 0 {
 		t.Fatal("no columns returned")

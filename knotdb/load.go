@@ -28,7 +28,58 @@ func BuildKnotInfoJSON(xlsPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	knots, err := rowsToKnots(headers, data, headers)
+	if err != nil {
+		return 0, err
+	}
+	if err := writeKnotInfoZip(KnotInfoFile, KnotInfoJSONEntry, headers, knots); err != nil {
+		return 0, err
+	}
+	Reset()
+	return len(knots), nil
+}
 
+// BuildKnotInfoSmallJSON reads the KnotInfo xls spreadsheet at xlsPath
+// and writes a zipped knot_info_small.json.zip into the current dataset
+// directory (see SetDir). It has the same shape as knot_info.json.zip
+// but restricts each row's column map to SmallColumns. Returns the
+// number of knot rows written.
+func BuildKnotInfoSmallJSON(xlsPath string) (int, error) {
+	headers, data, err := readKnotInfoXLS(xlsPath)
+	if err != nil {
+		return 0, err
+	}
+
+	// Verify every small column actually exists in the xls schema so we
+	// don't silently write out empty fields.
+	have := make(map[string]bool, len(headers))
+	for _, h := range headers {
+		have[h] = true
+	}
+	for _, c := range SmallColumns {
+		if !have[c] {
+			return 0, fmt.Errorf("xls missing small column %q", c)
+		}
+	}
+
+	small := make([]string, len(SmallColumns))
+	copy(small, SmallColumns)
+
+	knots, err := rowsToKnots(headers, data, small)
+	if err != nil {
+		return 0, err
+	}
+	if err := writeKnotInfoZip(KnotInfoSmallFile, KnotInfoSmallJSONEntry, small, knots); err != nil {
+		return 0, err
+	}
+	Reset()
+	return len(knots), nil
+}
+
+// rowsToKnots indexes xls rows by name, retaining only the columns in
+// keep. Empty values are omitted. Returns an error if any knot name
+// appears twice or if the headers don't include "name".
+func rowsToKnots(headers []string, data [][]string, keep []string) (map[string]map[string]string, error) {
 	nameCol := -1
 	for i, h := range headers {
 		if h == "name" {
@@ -37,7 +88,13 @@ func BuildKnotInfoJSON(xlsPath string) (int, error) {
 		}
 	}
 	if nameCol < 0 {
-		return 0, fmt.Errorf("xls has no 'name' column")
+		return nil, fmt.Errorf("xls has no 'name' column")
+	}
+
+	// Precompute indices of columns we keep, in xls order.
+	keepSet := make(map[string]bool, len(keep))
+	for _, c := range keep {
+		keepSet[c] = true
 	}
 
 	knots := make(map[string]map[string]string, len(data))
@@ -50,10 +107,13 @@ func BuildKnotInfoJSON(xlsPath string) (int, error) {
 			continue
 		}
 		if _, dup := knots[name]; dup {
-			return 0, fmt.Errorf("duplicate knot name %q at xls row %d", name, r)
+			return nil, fmt.Errorf("duplicate knot name %q at xls row %d", name, r)
 		}
-		k := make(map[string]string, len(headers))
+		k := make(map[string]string, len(keep))
 		for i, h := range headers {
+			if !keepSet[h] {
+				continue
+			}
 			var v string
 			if i < len(row) {
 				v = row[i]
@@ -64,35 +124,37 @@ func BuildKnotInfoJSON(xlsPath string) (int, error) {
 		}
 		knots[name] = k
 	}
+	return knots, nil
+}
 
-	ki := knotInfo{Columns: headers, Knots: knots}
-	outPath := filepath.Join(Dir(), KnotInfoFile)
+// writeKnotInfoZip marshals {columns, knots} to JSON, stores it in a
+// zip archive as jsonEntry, and writes the archive to Dir()/zipName.
+func writeKnotInfoZip(zipName, jsonEntry string, columns []string, knots map[string]map[string]string) error {
+	outPath := filepath.Join(Dir(), zipName)
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir: %w", err)
+		return fmt.Errorf("mkdir: %w", err)
 	}
-	raw, err := json.Marshal(ki)
+	raw, err := json.Marshal(knotInfo{Columns: columns, Knots: knots})
 	if err != nil {
-		return 0, fmt.Errorf("marshal: %w", err)
+		return fmt.Errorf("marshal: %w", err)
 	}
 
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	entry, err := zw.Create(KnotInfoJSONEntry)
+	entry, err := zw.Create(jsonEntry)
 	if err != nil {
-		return 0, fmt.Errorf("zip entry: %w", err)
+		return fmt.Errorf("zip entry: %w", err)
 	}
 	if _, err := entry.Write(raw); err != nil {
-		return 0, fmt.Errorf("zip write: %w", err)
+		return fmt.Errorf("zip write: %w", err)
 	}
 	if err := zw.Close(); err != nil {
-		return 0, fmt.Errorf("zip close: %w", err)
+		return fmt.Errorf("zip close: %w", err)
 	}
-
 	if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
-		return 0, fmt.Errorf("write %s: %w", outPath, err)
+		return fmt.Errorf("write %s: %w", outPath, err)
 	}
-	Reset()
-	return len(knots), nil
+	return nil
 }
 
 // readKnotInfoXLS opens the xls file and extracts the schema + data rows.
