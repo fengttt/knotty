@@ -27,8 +27,18 @@ go.work.sum
 # env file
 .env
 
-# Dataset working dir (large extracted archives; source archives are tracked via LFS)
-dataset/
+# Dataset working dir (large extracted archives; source archives are tracked via LFS).
+# Ignore contents but leave the directory itself un-ignored so negations below
+# can re-include specific files. (gitignore can't re-include a file whose
+# parent directory is fully excluded.)
+dataset/*
+# Re-include source archives tracked via LFS.
+!dataset/*.zip
+!dataset/*.tar.gz
+!dataset/*.xls
+!dataset/*.xlsx
+# Re-include the built sqlite3 DB tracked via LFS.
+!dataset/*.sqlite3
 
 # Editor/IDE
 # .idea/
