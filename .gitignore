@@ -50,3 +50,7 @@ dataset/knot_polys.xlsx
 .claude/
 .mcp.json
 *.log
+
+# Build artifacts
+/knotty
+/_site
