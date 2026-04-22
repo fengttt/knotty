@@ -44,21 +44,27 @@ var styleEntries = []styleEntry{
 type game struct {
 	ui *ebitenui.UI
 
-	root        *widget.Container
-	input       *widget.TextInput
-	imageWidget *widget.Graphic
-	infoArea    *widget.TextArea
-	titleText   *widget.Text
+	root         *widget.Container
+	input        *widget.TextInput
+	imageWidget  *scaledImage
+	nameLabel    *widget.Text
+	propCombo    *widget.ListComboButton
+	valueArea    *widget.TextArea
+	computeInput *widget.TextInput
+	resultArea   *widget.TextArea
+	titleText    *widget.Text
 
 	currentKnot  *knot.Knot
 	currentStyle knot.ImageType
+	currentProp  string
 
-	face    etext.Face
-	bigFace etext.Face
+	face     etext.Face
+	bigFace  etext.Face
+	hugeFace etext.Face
 }
 
 func main() {
-	g := &game{currentStyle: knot.Diagram}
+	g := &game{currentStyle: knot.Diagram, currentProp: "crossing_number"}
 
 	face, err := loadFont(14)
 	if err != nil {
@@ -70,15 +76,17 @@ func main() {
 		log.Fatalf("load font: %v", err)
 	}
 	g.bigFace = bigFace
+	hugeFace, err := loadFont(36)
+	if err != nil {
+		log.Fatalf("load font: %v", err)
+	}
+	g.hugeFace = hugeFace
 
 	g.ui = g.buildUI()
 
-	// Seed with a random knot so the window has something to show.
-	if name, err := knotdb.RandomKnotName(); err == nil {
-		g.loadKnot(name)
-	} else {
-		log.Printf("initial random knot failed: %v", err)
-	}
+	// Seed with the figure-eight knot so the window opens with a
+	// recognizable diagram.
+	g.loadKnot("4_1")
 
 	ebiten.SetWindowSize(windowWidth, windowHeight)
 	ebiten.SetWindowTitle("Knotty")
@@ -269,15 +277,13 @@ func (g *game) buildLeftPane() *widget.Container {
 	combo.SetSelectedEntry(entries[0])
 	left.AddChild(combo)
 
-	// Graphic requires an image at construction; supply a placeholder.
-	g.imageWidget = widget.NewGraphic(
-		widget.GraphicOpts.WidgetOpts(
-			widget.WidgetOpts.LayoutData(widget.GridLayoutData{
-				HorizontalPosition: widget.GridLayoutPositionCenter,
-				VerticalPosition:   widget.GridLayoutPositionCenter,
-			}),
-		),
-		widget.GraphicOpts.Image(placeholderImage("")),
+	// scaledImage fills the stretched cell and scales the knot image
+	// uniformly to fit, preserving aspect ratio.
+	g.imageWidget = newScaledImage(
+		widget.WidgetOpts.LayoutData(widget.GridLayoutData{
+			HorizontalPosition: widget.GridLayoutPositionStart,
+			VerticalPosition:   widget.GridLayoutPositionStart,
+		}),
 	)
 	left.AddChild(g.imageWidget)
 	return left
@@ -288,8 +294,11 @@ func (g *game) buildRightPane() *widget.Container {
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x22, 0x22, 0x2a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(1),
-			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{true}),
+			// 5 rows: name, property dropdown, property value (stretched),
+			// compute section (input + 2 buttons), compute result (stretched).
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, false, true, false, true}),
 			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(8)),
+			widget.GridLayoutOpts.Spacing(0, 8),
 		)),
 		widget.ContainerOpts.WidgetOpts(
 			// Pin right pane to ~1/3 of the window. MaxWidth caps the
@@ -301,14 +310,130 @@ func (g *game) buildRightPane() *widget.Container {
 		),
 	)
 
-	g.infoArea = widget.NewTextArea(
+	g.nameLabel = widget.NewText(
+		widget.TextOpts.Text("", &g.hugeFace, color.NRGBA{240, 240, 240, 255}),
+		widget.TextOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.GridLayoutData{
+				HorizontalPosition: widget.GridLayoutPositionCenter,
+			}),
+		),
+	)
+	right.AddChild(g.nameLabel)
+
+	// Dropdown to pick which knot_info property to display. Excludes
+	// "name" (shown above).
+	cols := knot.ColumnNames()
+	propEntries := make([]any, 0, len(cols))
+	var defaultEntry any
+	for _, c := range cols {
+		if c == "name" {
+			continue
+		}
+		propEntries = append(propEntries, c)
+		if c == g.currentProp {
+			defaultEntry = c
+		}
+	}
+	if defaultEntry == nil && len(propEntries) > 0 {
+		defaultEntry = propEntries[0]
+		g.currentProp = defaultEntry.(string)
+	}
+
+	g.propCombo = widget.NewListComboButton(
+		widget.ListComboButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.GridLayoutData{HorizontalPosition: widget.GridLayoutPositionStart}),
+		),
+		widget.ListComboButtonOpts.Entries(propEntries),
+		widget.ListComboButtonOpts.MaxContentHeight(300),
+		widget.ListComboButtonOpts.ButtonParams(&widget.ButtonParams{
+			Image:       buttonImage(),
+			TextPadding: widget.NewInsetsSimple(6),
+			TextColor: &widget.ButtonTextColor{
+				Idle:     color.NRGBA{240, 240, 240, 255},
+				Disabled: color.NRGBA{160, 160, 160, 255},
+			},
+			TextFace: &g.face,
+			MinSize:  &stdimage.Point{X: windowWidth/3 - 32, Y: 0},
+		}),
+		widget.ListComboButtonOpts.ListParams(&widget.ListParams{
+			ScrollContainerImage: &widget.ScrollContainerImage{
+				Idle:     uiimage.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+				Disabled: uiimage.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+				Mask:     uiimage.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+			},
+			Slider: &widget.SliderParams{
+				TrackImage: &widget.SliderTrackImage{
+					Idle:  uiimage.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+					Hover: uiimage.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+				},
+				HandleImage: buttonImage(),
+			},
+			EntryFace: &g.face,
+			EntryColor: &widget.ListEntryColor{
+				Selected:                  color.NRGBA{255, 255, 255, 255},
+				Unselected:                color.NRGBA{220, 220, 220, 255},
+				SelectedBackground:        color.NRGBA{80, 80, 140, 255},
+				SelectedFocusedBackground: color.NRGBA{100, 100, 160, 255},
+				FocusedBackground:         color.NRGBA{90, 90, 110, 255},
+				DisabledUnselected:        color.NRGBA{100, 100, 100, 255},
+				DisabledSelected:          color.NRGBA{100, 100, 100, 255},
+			},
+			EntryTextPadding: widget.NewInsetsSimple(5),
+		}),
+		widget.ListComboButtonOpts.EntryLabelFunc(
+			func(e any) string { return e.(string) },
+			func(e any) string { return e.(string) },
+		),
+		widget.ListComboButtonOpts.EntrySelectedHandler(func(args *widget.ListComboButtonEntrySelectedEventArgs) {
+			g.currentProp = args.Entry.(string)
+			g.refreshValue()
+		}),
+	)
+	if defaultEntry != nil {
+		g.propCombo.SetSelectedEntry(defaultEntry)
+	}
+	right.AddChild(g.propCombo)
+
+	g.valueArea = widget.NewTextArea(
 		widget.TextAreaOpts.ContainerOpts(
 			widget.ContainerOpts.WidgetOpts(
 				widget.WidgetOpts.LayoutData(widget.GridLayoutData{
 					HorizontalPosition: widget.GridLayoutPositionStart,
 					VerticalPosition:   widget.GridLayoutPositionStart,
 				}),
-				widget.WidgetOpts.MinSize(windowWidth/3-32, windowHeight-100),
+				widget.WidgetOpts.MinSize(windowWidth/3-32, 200),
+			),
+		),
+		widget.TextAreaOpts.ControlWidgetSpacing(4),
+		widget.TextAreaOpts.FontColor(color.NRGBA{230, 230, 230, 255}),
+		widget.TextAreaOpts.FontFace(&g.bigFace),
+		widget.TextAreaOpts.TextPadding(widget.Insets{Top: 6, Bottom: 6, Left: 6, Right: 6}),
+		widget.TextAreaOpts.ShowVerticalScrollbar(),
+		widget.TextAreaOpts.ScrollContainerImage(&widget.ScrollContainerImage{
+			Idle: uiimage.NewNineSliceColor(color.NRGBA{45, 45, 55, 255}),
+			Mask: uiimage.NewNineSliceColor(color.NRGBA{45, 45, 55, 255}),
+		}),
+		widget.TextAreaOpts.SliderParams(&widget.SliderParams{
+			TrackImage: &widget.SliderTrackImage{
+				Idle:  uiimage.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+				Hover: uiimage.NewNineSliceColor(color.NRGBA{80, 80, 90, 255}),
+			},
+			HandleImage: buttonImage(),
+		}),
+		widget.TextAreaOpts.Text(""),
+	)
+	right.AddChild(g.valueArea)
+
+	right.AddChild(g.buildComputeSection())
+
+	g.resultArea = widget.NewTextArea(
+		widget.TextAreaOpts.ContainerOpts(
+			widget.ContainerOpts.WidgetOpts(
+				widget.WidgetOpts.LayoutData(widget.GridLayoutData{
+					HorizontalPosition: widget.GridLayoutPositionStart,
+					VerticalPosition:   widget.GridLayoutPositionStart,
+				}),
+				widget.WidgetOpts.MinSize(windowWidth/3-32, 120),
 			),
 		),
 		widget.TextAreaOpts.ControlWidgetSpacing(4),
@@ -329,8 +454,78 @@ func (g *game) buildRightPane() *widget.Container {
 		}),
 		widget.TextAreaOpts.Text(""),
 	)
-	right.AddChild(g.infoArea)
+	right.AddChild(g.resultArea)
+
 	return right
+}
+
+// buildComputeSection is the per-knot compute UI on the right pane: a
+// property-name input and two buttons that trigger compute-from-image
+// and compute-from-text. Since knot algorithms are NYI, the handlers
+// just record what they would have computed into resultArea.
+func (g *game) buildComputeSection() *widget.Container {
+	sec := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewGridLayout(
+			widget.GridLayoutOpts.Columns(1),
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, false}),
+			widget.GridLayoutOpts.Spacing(0, 6),
+		)),
+	)
+
+	g.computeInput = widget.NewTextInput(
+		widget.TextInputOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.GridLayoutData{HorizontalPosition: widget.GridLayoutPositionStart}),
+			widget.WidgetOpts.MinSize(windowWidth/3-32, 0),
+		),
+		widget.TextInputOpts.Image(&widget.TextInputImage{
+			Idle:     uiimage.NewNineSliceColor(color.NRGBA{60, 60, 70, 255}),
+			Disabled: uiimage.NewNineSliceColor(color.NRGBA{40, 40, 50, 255}),
+		}),
+		widget.TextInputOpts.Face(&g.face),
+		widget.TextInputOpts.Color(&widget.TextInputColor{
+			Idle:          color.NRGBA{240, 240, 240, 255},
+			Disabled:      color.NRGBA{160, 160, 160, 255},
+			Caret:         color.NRGBA{240, 240, 240, 255},
+			DisabledCaret: color.NRGBA{160, 160, 160, 255},
+		}),
+		widget.TextInputOpts.Padding(widget.NewInsetsSimple(6)),
+		widget.TextInputOpts.Placeholder("Property to compute (e.g. jones_polynomial)"),
+	)
+	sec.AddChild(g.computeInput)
+
+	btnRow := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewRowLayout(
+			widget.RowLayoutOpts.Direction(widget.DirectionHorizontal),
+			widget.RowLayoutOpts.Spacing(8),
+		)),
+	)
+	fromImgBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(0, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Text("Compute from Image", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
+		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 4, Bottom: 4}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.computeFromImage()
+		}),
+	)
+	fromTxtBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.MinSize(0, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Text("Compute from Text", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
+		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 4, Bottom: 4}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.computeFromText()
+		}),
+	)
+	btnRow.AddChild(fromImgBtn)
+	btnRow.AddChild(fromTxtBtn)
+	sec.AddChild(btnRow)
+
+	return sec
 }
 
 // doSearch handles the search button / Enter key: look up name, or pick
@@ -340,7 +535,7 @@ func (g *game) doSearch(q string) {
 	if q == "" {
 		name, err := knotdb.RandomKnotName()
 		if err != nil {
-			g.infoArea.SetText(fmt.Sprintf("random: %v", err))
+			g.valueArea.SetText(fmt.Sprintf("random: %v", err))
 			return
 		}
 		q = name
@@ -352,58 +547,91 @@ func (g *game) doSearch(q string) {
 func (g *game) loadKnot(name string) {
 	k, err := knot.FindKnotByName(name)
 	if err != nil {
-		g.infoArea.SetText(fmt.Sprintf("not found: %q (%v)", name, err))
+		g.nameLabel.Label = name + " (not found)"
 		g.titleText.Label = name + " (not found)"
+		g.valueArea.SetText(err.Error())
 		return
 	}
 	g.currentKnot = k
+	g.nameLabel.Label = k.GetName()
 	g.titleText.Label = k.GetName()
 	g.input.SetText(k.GetName())
 	g.refreshImage()
-	g.refreshInfo()
+	g.refreshValue()
+	if g.resultArea != nil {
+		g.resultArea.SetText("")
+	}
 }
 
 // refreshImage re-loads the current knot's image for the current style.
-// After swapping the image, request a relayout so the Graphic widget's
-// allocated rect reflects the new preferred size.
 func (g *game) refreshImage() {
 	if g.currentKnot == nil {
+		g.imageWidget.Image = nil
 		return
 	}
 	data, kind, err := g.currentKnot.LoadImage(g.currentStyle)
 	if err != nil {
 		log.Printf("load image: %v", err)
-		g.imageWidget.Image = placeholderImage("")
-	} else {
-		img, err := decodeKnotImage(data, kind)
-		if err != nil {
-			log.Printf("decode image: %v", err)
-			g.imageWidget.Image = placeholderImage("")
-		} else {
-			g.imageWidget.Image = img
-		}
-	}
-	if g.root != nil {
-		g.root.RequestRelayout()
-	}
-}
-
-// refreshInfo rebuilds the knot_info display as "col: value" lines,
-// skipping empty columns.
-func (g *game) refreshInfo() {
-	if g.currentKnot == nil {
-		g.infoArea.SetText("")
+		g.imageWidget.Image = nil
 		return
 	}
-	var b bytes.Buffer
-	for _, col := range knot.ColumnNames() {
-		v := g.currentKnot.Raw(col)
-		if v == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "%s: %s\n", col, v)
+	img, err := decodeKnotImage(data, kind)
+	if err != nil {
+		log.Printf("decode image: %v", err)
+		g.imageWidget.Image = nil
+		return
 	}
-	g.infoArea.SetText(b.String())
+	g.imageWidget.Image = img
+}
+
+// computeFromImage simulates computing the requested property from the
+// current knot's left-pane image. Knot algorithms are NYI, so the
+// handler just records the inputs and emits a NYI message.
+func (g *game) computeFromImage() {
+	prop := trim(g.computeInput.GetText())
+	if prop == "" {
+		g.resultArea.SetText("compute from image: no property specified")
+		return
+	}
+	imgDesc := "(no image)"
+	if g.imageWidget != nil && g.imageWidget.Image != nil {
+		b := g.imageWidget.Image.Bounds()
+		imgDesc = fmt.Sprintf("image %dx%d (style=%s)", b.Dx(), b.Dy(), g.currentStyle)
+	}
+	g.resultArea.SetText(fmt.Sprintf(
+		"Compute from Image\nproperty: %s\ninput: %s\n\nnot yet implemented",
+		prop, imgDesc,
+	))
+}
+
+// computeFromText simulates computing the requested property from the
+// text currently shown in valueArea (i.e. the dropdown-selected
+// property's value). Knot algorithms are NYI.
+func (g *game) computeFromText() {
+	prop := trim(g.computeInput.GetText())
+	if prop == "" {
+		g.resultArea.SetText("compute from text: no property specified")
+		return
+	}
+	src := g.valueArea.GetText()
+	g.resultArea.SetText(fmt.Sprintf(
+		"Compute from Text\nproperty: %s\ninput property: %s\ninput text:\n%s\n\nnot yet implemented",
+		prop, g.currentProp, src,
+	))
+}
+
+// refreshValue shows the currently-selected knot_info property's value
+// in the right pane's text area.
+func (g *game) refreshValue() {
+	if g.currentKnot == nil || g.currentProp == "" {
+		g.valueArea.SetText("")
+		return
+	}
+	v := g.currentKnot.Raw(g.currentProp)
+	if v == "" {
+		v = "(empty)"
+	}
+	g.valueArea.SetText(v)
 }
 
 // trim is a tiny inline whitespace trimmer so we don't need another import.

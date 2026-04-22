@@ -18,10 +18,11 @@ const rasterSize = 600
 
 // decodeKnotImage decodes the raw bytes of a knot image into an
 // *ebiten.Image. PNG uses the standard library; SVG is rasterized via
-// oksvg + rasterx at rasterSize x rasterSize.
+// oksvg + rasterx at rasterSize x rasterSize. Returns (nil, nil) when
+// data is empty (the knot has no stored image for this style).
 func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, error) {
 	if len(data) == 0 {
-		return placeholderImage("no image"), nil
+		return nil, nil
 	}
 	switch kind {
 	case knot.PNG:
@@ -47,8 +48,3 @@ func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, error) {
 	}
 }
 
-// placeholderImage returns a small blank *ebiten.Image used when a knot
-// has no stored image (e.g. the unknot).
-func placeholderImage(_ string) *ebiten.Image {
-	return ebiten.NewImage(1, 1)
-}
