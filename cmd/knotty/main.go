@@ -1,7 +1,9 @@
 // Command knotty is the Ebiten-based GUI for exploring the KnotInfo
-// database: search a knot by name (empty = random), display one of its
-// five images (Diagram, DiagramMirror, Snappy, SnappyMirror, Grid) on
-// the left, and its Diagram properties on the right as a scrollable pane.
+// database. The window is 9:16 portrait: a full-width square image of
+// the knot on top, and a scrollable properties panel underneath. The
+// panel hosts the search input, Search/Refresh buttons, the image-style
+// dropdown (Diagram, DiagramMirror, Snappy, SnappyMirror, Grid), the
+// knot name, and the raw column values for the current Diagram.
 package main
 
 import (
@@ -24,8 +26,10 @@ import (
 )
 
 const (
-	windowWidth  = 1280
-	windowHeight = 800
+	// 9:16 portrait — the top pane is a full-width windowWidth × windowWidth
+	// square (the knot diagram) and the rest scrolls underneath it.
+	windowWidth  = 540
+	windowHeight = 960
 )
 
 // styleEntry is one of the five image types, shown in the dropdown.
@@ -88,7 +92,22 @@ func main() {
 	}
 }
 
-func (g *game) Layout(outW, outH int) (int, int) { return outW, outH }
+// Layout is called by Ebiten with the current logical screen size. We
+// use it as a hook to resize the top image cell to match the window
+// width so the square picture area always fills the full width.
+func (g *game) Layout(outW, outH int) (int, int) {
+	if g.imageWidget != nil {
+		w := g.imageWidget.GetWidget()
+		if w.MinWidth != outW {
+			w.MinWidth = outW
+			w.MinHeight = outW
+			if g.root != nil {
+				g.root.RequestRelayout()
+			}
+		}
+	}
+	return outW, outH
+}
 
 func (g *game) Update() error {
 	g.ui.Update()
@@ -102,47 +121,63 @@ func (g *game) Draw(screen *ebiten.Image) {
 
 // buildUI constructs the full UI tree.
 //
-// Layout:
+// Layout (9:16 portrait):
 //
-//	root (grid 2 cols, 2/3 | 1/3):
-//	├─ leftPane: [style dropdown][image]
-//	└─ rightPane: [search row][name][properties text area]
+//	root (grid 1 col, 2 rows; top fixed square, bottom stretched):
+//	├─ topPane: [full-width square image]
+//	└─ bottomPane: [search row + style][name][scrolling properties]
 func (g *game) buildUI() *ebitenui.UI {
 	root := widget.NewContainer(
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x1a, 0x1a, 0x1a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
-			widget.GridLayoutOpts.Columns(2),
-			widget.GridLayoutOpts.Stretch([]bool{true, false}, []bool{true}),
-			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(8)),
-			widget.GridLayoutOpts.Spacing(8, 0),
+			widget.GridLayoutOpts.Columns(1),
+			// Top row sized by content (a windowWidth-side square);
+			// bottom row stretches to fill remaining vertical space.
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
 		)),
 	)
 
 	g.root = root
-	root.AddChild(g.buildLeftPane())
-	root.AddChild(g.buildRightPane())
+	root.AddChild(g.buildTopPane())
+	root.AddChild(g.buildBottomPane())
 
 	return &ebitenui.UI{Container: root}
 }
 
-func (g *game) buildLeftPane() *widget.Container {
-	left := widget.NewContainer(
+func (g *game) buildTopPane() *widget.Container {
+	top := widget.NewContainer(
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x22, 0x22, 0x2a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(1),
-			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
-			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(8)),
-			widget.GridLayoutOpts.Spacing(0, 8),
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{true}),
 		)),
 	)
 
+	// Full-width square: the image cell's MinWidth / MinHeight are updated
+	// every frame in game.Layout so the square follows the current window
+	// width. The initial MinSize is just the starting window width so the
+	// first frame renders correctly.
+	g.imageWidget = newScaledImage(
+		widget.WidgetOpts.LayoutData(widget.GridLayoutData{
+			HorizontalPosition: widget.GridLayoutPositionStart,
+			VerticalPosition:   widget.GridLayoutPositionStart,
+		}),
+		widget.WidgetOpts.MinSize(windowWidth, windowWidth),
+	)
+	top.AddChild(g.imageWidget)
+	return top
+}
+
+// buildStyleCombo builds the image-style dropdown. Lives inside the
+// search row at the top of the bottom pane.
+func (g *game) buildStyleCombo() *widget.ListComboButton {
 	entries := make([]any, len(styleEntries))
 	for i, e := range styleEntries {
 		entries[i] = e
 	}
 	combo := widget.NewListComboButton(
 		widget.ListComboButtonOpts.WidgetOpts(
-			widget.WidgetOpts.LayoutData(widget.GridLayoutData{HorizontalPosition: widget.GridLayoutPositionStart}),
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
 		),
 		widget.ListComboButtonOpts.Entries(entries),
 		widget.ListComboButtonOpts.MaxContentHeight(200),
@@ -154,7 +189,7 @@ func (g *game) buildLeftPane() *widget.Container {
 				Disabled: color.NRGBA{160, 160, 160, 255},
 			},
 			TextFace: &g.face,
-			MinSize:  &stdimage.Point{X: 200, Y: 0},
+			MinSize:  &stdimage.Point{X: 140, Y: 0},
 		}),
 		widget.ListComboButtonOpts.ListParams(&widget.ListParams{
 			ScrollContainerImage: &widget.ScrollContainerImage{
@@ -192,18 +227,7 @@ func (g *game) buildLeftPane() *widget.Container {
 		}),
 	)
 	combo.SetSelectedEntry(entries[0])
-	left.AddChild(combo)
-
-	// scaledImage fills the stretched cell and scales the knot image
-	// uniformly to fit, preserving aspect ratio.
-	g.imageWidget = newScaledImage(
-		widget.WidgetOpts.LayoutData(widget.GridLayoutData{
-			HorizontalPosition: widget.GridLayoutPositionStart,
-			VerticalPosition:   widget.GridLayoutPositionStart,
-		}),
-	)
-	left.AddChild(g.imageWidget)
-	return left
+	return combo
 }
 
 // buildSearchRow builds the top row of the right pane: knot-name input,
@@ -219,9 +243,8 @@ func (g *game) buildSearchRow() *widget.Container {
 	g.input = widget.NewTextInput(
 		widget.TextInputOpts.WidgetOpts(
 			widget.WidgetOpts.LayoutData(widget.RowLayoutData{
-				Position:  widget.RowLayoutPositionCenter,
-				Stretch:   true,
-				MaxWidth:  windowWidth / 3,
+				Position: widget.RowLayoutPositionCenter,
+				Stretch:  true,
 			}),
 			widget.WidgetOpts.MinSize(120, 0),
 		),
@@ -272,11 +295,13 @@ func (g *game) buildSearchRow() *widget.Container {
 	)
 	row.AddChild(refreshBtn)
 
+	row.AddChild(g.buildStyleCombo())
+
 	return row
 }
 
-func (g *game) buildRightPane() *widget.Container {
-	right := widget.NewContainer(
+func (g *game) buildBottomPane() *widget.Container {
+	bottom := widget.NewContainer(
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x22, 0x22, 0x2a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(1),
@@ -285,17 +310,9 @@ func (g *game) buildRightPane() *widget.Container {
 			widget.GridLayoutOpts.Padding(widget.NewInsetsSimple(8)),
 			widget.GridLayoutOpts.Spacing(0, 8),
 		)),
-		widget.ContainerOpts.WidgetOpts(
-			// Pin right pane to ~1/3 of the window. MaxWidth caps the
-			// column width in GridLayout; MinSize prevents shrinking.
-			widget.WidgetOpts.LayoutData(widget.GridLayoutData{
-				MaxWidth: windowWidth / 3,
-			}),
-			widget.WidgetOpts.MinSize(windowWidth/3, 0),
-		),
 	)
 
-	right.AddChild(g.buildSearchRow())
+	bottom.AddChild(g.buildSearchRow())
 
 	g.nameLabel = widget.NewText(
 		widget.TextOpts.Text("", &g.hugeFace, color.NRGBA{240, 240, 240, 255}),
@@ -305,7 +322,7 @@ func (g *game) buildRightPane() *widget.Container {
 			}),
 		),
 	)
-	right.AddChild(g.nameLabel)
+	bottom.AddChild(g.nameLabel)
 
 	g.propsArea = widget.NewTextArea(
 		widget.TextAreaOpts.ContainerOpts(
@@ -314,7 +331,7 @@ func (g *game) buildRightPane() *widget.Container {
 					HorizontalPosition: widget.GridLayoutPositionStart,
 					VerticalPosition:   widget.GridLayoutPositionStart,
 				}),
-				widget.WidgetOpts.MinSize(windowWidth/3-32, 400),
+				widget.WidgetOpts.MinSize(0, 200),
 			),
 		),
 		widget.TextAreaOpts.ControlWidgetSpacing(4),
@@ -335,9 +352,9 @@ func (g *game) buildRightPane() *widget.Container {
 		}),
 		widget.TextAreaOpts.Text(""),
 	)
-	right.AddChild(g.propsArea)
+	bottom.AddChild(g.propsArea)
 
-	return right
+	return bottom
 }
 
 // doSearch handles the search button / Enter key: look up name, or pick

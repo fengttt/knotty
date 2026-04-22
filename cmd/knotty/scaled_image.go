@@ -8,9 +8,10 @@ import (
 )
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
-// stretched to fill its allocated Rect. Aspect ratio is not preserved
-// — the image is scaled independently in x and y so the diagram
-// occupies the full pane.
+// uniformly scaled to fit inside its allocated Rect, preserving aspect
+// ratio and centered. When the Rect is wider than it is tall (or vice
+// versa), the image renders as a centered square-ish region with empty
+// space on the long axis.
 type scaledImage struct {
 	Image *ebiten.Image
 
@@ -43,9 +44,25 @@ func (s *scaledImage) SetLocation(rect image.Rectangle) {
 	s.widget.Rect = rect
 }
 
-// PreferredSize advertises a small minimum; the real size comes from
-// the enclosing stretched grid cell.
-func (s *scaledImage) PreferredSize() (int, int) { return 64, 64 }
+// PreferredSize is what the enclosing layout uses to size the cell.
+// We honor MinWidth / MinHeight on the underlying Widget so callers can
+// drive the cell size by setting those fields (including dynamically —
+// game.Layout updates MinWidth/MinHeight every frame to keep the
+// picture area a full-width square). A small intrinsic floor keeps the
+// widget visible before the first Layout pass.
+func (s *scaledImage) PreferredSize() (int, int) {
+	s.init.Do()
+	w, h := 64, 64
+	if s.widget != nil {
+		if s.widget.MinWidth > w {
+			w = s.widget.MinWidth
+		}
+		if s.widget.MinHeight > h {
+			h = s.widget.MinHeight
+		}
+	}
+	return w, h
+}
 
 func (s *scaledImage) Validate() {}
 
@@ -71,8 +88,16 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	}
 	sx := float64(rw) / float64(iw)
 	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
 	opts := ebiten.DrawImageOptions{}
-	opts.GeoM.Scale(sx, sy)
-	opts.GeoM.Translate(float64(s.widget.Rect.Min.X), float64(s.widget.Rect.Min.Y))
+	opts.GeoM.Scale(scale, scale)
+	opts.GeoM.Translate(ox, oy)
 	screen.DrawImage(s.Image, &opts)
 }
