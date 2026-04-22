@@ -1,166 +1,76 @@
 package knotdb
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"database/sql"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-const testDatasetDirRel = "../dataset"
-
-func TestLoadKnotImg(t *testing.T) {
-	datasetDir, _ := filepath.Abs(testDatasetDirRel)
-	dbPath := useTestDB(t)
-
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s (run TestLoadKnotInfo first): %v", dbPath, err)
+func TestImagePathShapes(t *testing.T) {
+	cases := []struct {
+		style string
+		want  string
+	}{
+		{StyleDiagram, filepath.Join("d", "diagrams", "3_1.png")},
+		{StyleDiagramMirror, filepath.Join("d", "diagrams", "3_1mirror.png")},
+		{StyleSnappy, filepath.Join("d", "diagrams_snappy", "snappyKnot3_1.png")},
+		{StyleSnappyMirror, filepath.Join("d", "diagrams_snappy", "snappyMirrorKnot3_1.png")},
+		{StyleGrid, filepath.Join("d", "GridDiagramSVG_D", "grid3_1.svg")},
 	}
+	for _, c := range cases {
+		got, err := imagePath("d", "3_1", c.style)
+		if err != nil {
+			t.Errorf("imagePath(%s): %v", c.style, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("imagePath(%s) = %q, want %q", c.style, got, c.want)
+		}
+	}
+	if _, err := imagePath("d", "3_1", "bogus"); err == nil {
+		t.Error("expected error for unknown style")
+	}
+}
+
+func TestLoadImageBlob(t *testing.T) {
+	datasetDir, _ := filepath.Abs(testDatasetRel)
+	useTestDir(t)
+
 	if _, err := os.Stat(filepath.Join(datasetDir, "diagrams")); err != nil {
 		t.Skipf("diagrams dir missing: %v", err)
 	}
 
-	n, err := LoadKnotImages(datasetDir)
+	// 0_1 (unknot) has no images.
+	data, err := LoadImageBlob("0_1", StyleDiagram)
 	if err != nil {
-		t.Fatalf("LoadKnotImages: %v", err)
+		t.Fatalf("LoadImageBlob(0_1, diagram): %v", err)
 	}
-	if n == 0 {
-		t.Fatalf("no rows inserted")
+	if len(data) != 0 {
+		t.Errorf("0_1 diagram: expected empty, got %d bytes", len(data))
 	}
-	t.Logf("loaded images for %d knots", n)
 
-	db, err := sql.Open("sqlite", dbPath)
+	// 3_1 should have a PNG diagram.
+	data, err = LoadImageBlob("3_1", StyleDiagram)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf("LoadImageBlob(3_1, diagram): %v", err)
 	}
-	defer db.Close()
-
-	var rows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM "` + KnotImgTable + `"`).Scan(&rows); err != nil {
-		t.Fatalf("count: %v", err)
+	if len(data) == 0 {
+		t.Fatalf("3_1 diagram: got 0 bytes")
 	}
-	if rows != n {
-		t.Errorf("row count mismatch: insert reported %d, table has %d", n, rows)
-	}
-}
-
-func TestCheckKnotImage(t *testing.T) {
-	datasetDir, _ := filepath.Abs(testDatasetDirRel)
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded: %v", err)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-
-	var total int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM "` + KnotImgTable + `"`).Scan(&total); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	t.Logf("total knots in %s: %d", KnotImgTable, total)
-	if total == 0 {
-		t.Fatalf("%s is empty (run TestLoadKnotImg first)", KnotImgTable)
-	}
-
-	type colInfo struct {
-		col     string
-		present int
-		bytes   int64
-	}
-	stats := []colInfo{
-		{col: "diagram"},
-		{col: "diagram_mirror"},
-		{col: "snappy"},
-		{col: "snappy_mirror"},
-		{col: "grid"},
-	}
-	for i, s := range stats {
-		q := `SELECT COUNT(` + quoteIdent(s.col) + `), IFNULL(SUM(LENGTH(` +
-			quoteIdent(s.col) + `)), 0) FROM "` + KnotImgTable + `"`
-		if err := db.QueryRow(q).Scan(&stats[i].present, &stats[i].bytes); err != nil {
-			t.Fatalf("stats for %s: %v", s.col, err)
+	want := []byte{0x89, 'P', 'N', 'G'}
+	for i, b := range want {
+		if i >= len(data) || data[i] != b {
+			t.Errorf("3_1 diagram byte %d = %#x, want %#x", i, data[i], b)
+			break
 		}
 	}
-	t.Logf("%-16s %10s %15s", "column", "nonNull", "bytes")
-	for _, s := range stats {
-		t.Logf("%-16s %10d %15d", s.col, s.present, s.bytes)
-	}
 
-	sampleSize := 10
-	names := loadSampleNames(t, db, sampleSize)
-	if len(names) == 0 {
-		t.Fatalf("could not sample any knot names")
-	}
-	t.Logf("verifying %d sampled knots", len(names))
-
-	layout := imageLayout{datasetDir: datasetDir}
-	type check struct {
-		col  string
-		path func(string) string
-	}
-	checks := []check{
-		{"diagram", layout.diagramPath},
-		{"diagram_mirror", layout.diagramMirrorPath},
-		{"snappy", layout.snappyPath},
-		{"snappy_mirror", layout.snappyMirrorPath},
-		{"grid", layout.gridPath},
-	}
-
-	for _, name := range names {
-		for _, c := range checks {
-			var blob []byte
-			err := db.QueryRow(`SELECT `+quoteIdent(c.col)+` FROM "`+KnotImgTable+`" WHERE name = ?`, name).Scan(&blob)
-			if err != nil {
-				t.Fatalf("select %s %s: %v", c.col, name, err)
-			}
-
-			path := c.path(name)
-			fileData, ferr := os.ReadFile(path)
-			if ferr != nil {
-				if len(blob) != 0 {
-					t.Errorf("%s %s: db has %d bytes but file missing (%v)", name, c.col, len(blob), ferr)
-				}
-				continue
-			}
-			if !bytes.Equal(blob, fileData) {
-				t.Errorf("%s %s: blob (%d bytes, sha=%x) != file (%d bytes, sha=%x)",
-					name, c.col, len(blob), sha256.Sum256(blob), len(fileData), sha256.Sum256(fileData))
-			}
-		}
-	}
-}
-
-// loadSampleNames pulls all names, shuffles with a fixed seed, and returns
-// up to n of them. Using a deterministic seed keeps test output stable.
-func loadSampleNames(t *testing.T, db *sql.DB, n int) []string {
-	t.Helper()
-	rows, err := db.Query(`SELECT name FROM "` + KnotImgTable + `"`)
+	// Grid SVG.
+	data, err = LoadImageBlob("3_1", StyleGrid)
 	if err != nil {
-		t.Fatalf("select names: %v", err)
+		t.Fatalf("LoadImageBlob(3_1, grid): %v", err)
 	}
-	defer rows.Close()
-	var all []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		all = append(all, s)
+	if len(data) == 0 {
+		t.Errorf("3_1 grid: got 0 bytes")
 	}
-	if len(all) == 0 {
-		return nil
-	}
-	r := rand.New(rand.NewPCG(1, 2))
-	r.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
-	if n > len(all) {
-		n = len(all)
-	}
-	return all[:n]
 }

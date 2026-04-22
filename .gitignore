@@ -37,8 +37,8 @@ dataset/*
 !dataset/*.tar.gz
 !dataset/*.xls
 !dataset/*.xlsx
-# Re-include the built sqlite3 DB tracked via LFS.
-!dataset/*.sqlite3
+# Re-include the generated knot_info JSON tracked via LFS.
+!dataset/knot_info.json
 # Local-only working file; not tracked.
 dataset/knot_polys.xlsx
 

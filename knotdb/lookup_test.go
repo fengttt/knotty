@@ -1,59 +1,27 @@
 package knotdb
 
 import (
-	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
-func TestEnsureIndexes(t *testing.T) {
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
-	}
-
-	if err := EnsureIndexes(); err != nil {
-		t.Fatalf("EnsureIndexes: %v", err)
-	}
-	// Idempotent.
-	if err := EnsureIndexes(); err != nil {
-		t.Fatalf("EnsureIndexes (second call): %v", err)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
+func jsonPath(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join(testDatasetRel, KnotInfoFile))
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("abs json: %v", err)
 	}
-	defer db.Close()
-
-	have := map[string]bool{}
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='index'`)
-	if err != nil {
-		t.Fatalf("query indexes: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		have[n] = true
-	}
-	for _, want := range []string{"idx_knot_info_name", "idx_knot_img_name"} {
-		if !have[want] {
-			t.Errorf("missing index %q", want)
-		}
-	}
+	return p
 }
 
 func TestFindKnotRow(t *testing.T) {
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	jp := jsonPath(t)
+	if _, err := os.Stat(jp); err != nil {
+		t.Skipf("%s not built yet: %v", jp, err)
 	}
+	useTestDir(t)
 
 	cols, vals, err := FindKnotRow("4_1")
 	if err != nil {
@@ -78,10 +46,12 @@ func TestFindKnotRow(t *testing.T) {
 }
 
 func TestFindKnotRowMissing(t *testing.T) {
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	jp := jsonPath(t)
+	if _, err := os.Stat(jp); err != nil {
+		t.Skipf("%s not built yet: %v", jp, err)
 	}
+	useTestDir(t)
+
 	_, _, err := FindKnotRow("this_is_not_a_knot")
 	if !errors.Is(err, ErrKnotNotFound) {
 		t.Errorf("expected ErrKnotNotFound, got %v", err)
@@ -89,10 +59,12 @@ func TestFindKnotRowMissing(t *testing.T) {
 }
 
 func TestRandomKnotName(t *testing.T) {
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	jp := jsonPath(t)
+	if _, err := os.Stat(jp); err != nil {
+		t.Skipf("%s not built yet: %v", jp, err)
 	}
+	useTestDir(t)
+
 	seen := map[string]bool{}
 	for i := 0; i < 5; i++ {
 		n, err := RandomKnotName()
@@ -104,43 +76,36 @@ func TestRandomKnotName(t *testing.T) {
 		}
 		seen[n] = true
 	}
-	// With ~12966 rows, five picks should very rarely collide.
 	if len(seen) < 2 {
 		t.Errorf("expected variety across 5 picks, got %v", seen)
 	}
 }
 
-func TestLoadImageBlob(t *testing.T) {
-	dbPath := useTestDB(t)
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+func TestKnotInfoColumns(t *testing.T) {
+	jp := jsonPath(t)
+	if _, err := os.Stat(jp); err != nil {
+		t.Skipf("%s not built yet: %v", jp, err)
 	}
+	useTestDir(t)
 
-	// 0_1 (unknot) has no images.
-	data, err := LoadImageBlob("0_1", "diagram")
+	cols, err := KnotInfoColumns()
 	if err != nil {
-		t.Fatalf("LoadImageBlob(0_1, diagram): %v", err)
+		t.Fatalf("KnotInfoColumns: %v", err)
 	}
-	if len(data) != 0 {
-		t.Errorf("0_1 diagram: expected empty, got %d bytes", len(data))
+	if len(cols) == 0 {
+		t.Fatal("no columns returned")
 	}
-
-	// 3_1 should have a diagram (PNG).
-	data, err = LoadImageBlob("3_1", "diagram")
-	if err != nil {
-		t.Fatalf("LoadImageBlob(3_1, diagram): %v", err)
+	if cols[0] != "name" {
+		t.Errorf("expected first column %q, got %q", "name", cols[0])
 	}
-	if len(data) == 0 {
-		t.Errorf("3_1 diagram: got 0 bytes")
+	want := []string{"crossing_number", "jones_polynomial", "signature", "determinant"}
+	have := map[string]bool{}
+	for _, c := range cols {
+		have[c] = true
 	}
-	want := []byte{0x89, 'P', 'N', 'G'}
-	for i, b := range want {
-		if i >= len(data) {
-			t.Fatalf("3_1 diagram: too short")
-		}
-		if data[i] != b {
-			t.Errorf("3_1 diagram byte %d = %#x, want %#x", i, data[i], b)
-			break
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("missing expected column %q", w)
 		}
 	}
 }

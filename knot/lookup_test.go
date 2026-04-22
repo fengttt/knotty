@@ -7,32 +7,37 @@ import (
 	"testing"
 
 	"github.com/fengttt/knotty/knotdb"
-	_ "modernc.org/sqlite"
 )
 
-const testDbRel = "../dataset/knotty.sqlite3"
+const (
+	testDatasetRel = "../dataset"
+	testJSONRel    = "../dataset/knot_info.json"
+)
 
-// useTestDB redirects knotdb to the test sqlite file for the duration of t.
-func useTestDB(t *testing.T) string {
+// useTestDir redirects knotdb to the test dataset directory for t.
+func useTestDir(t *testing.T) {
 	t.Helper()
-	dbPath, err := filepath.Abs(testDbRel)
+	dir, err := filepath.Abs(testDatasetRel)
 	if err != nil {
-		t.Fatalf("abs db: %v", err)
+		t.Fatalf("abs dir: %v", err)
 	}
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	jp, err := filepath.Abs(testJSONRel)
+	if err != nil {
+		t.Fatalf("abs json: %v", err)
 	}
-	prev := knotdb.Path()
-	knotdb.SetPath(dbPath)
+	if _, err := os.Stat(jp); err != nil {
+		t.Skipf("knot_info.json not built at %s: %v", jp, err)
+	}
+	prev := knotdb.Dir()
+	knotdb.SetDir(dir)
 	t.Cleanup(func() {
-		_ = knotdb.Close()
-		knotdb.SetPath(prev)
+		knotdb.SetDir(prev)
+		knotdb.Reset()
 	})
-	return dbPath
 }
 
 func TestFindKnotByName(t *testing.T) {
-	useTestDB(t)
+	useTestDir(t)
 
 	k, err := FindKnotByName("4_1")
 	if err != nil {
@@ -62,7 +67,7 @@ func TestFindKnotByName(t *testing.T) {
 }
 
 func TestFindKnotByNameTrefoil(t *testing.T) {
-	useTestDB(t)
+	useTestDir(t)
 
 	k, err := FindKnotByName("3_1")
 	if err != nil {
@@ -84,7 +89,8 @@ func TestFindKnotByNameTrefoil(t *testing.T) {
 }
 
 func TestFindKnotByNameMissing(t *testing.T) {
-	useTestDB(t)
+	useTestDir(t)
+
 	_, err := FindKnotByName("this_is_not_a_knot")
 	if !errors.Is(err, knotdb.ErrKnotNotFound) {
 		t.Errorf("expected ErrKnotNotFound, got %v", err)
@@ -92,9 +98,9 @@ func TestFindKnotByNameMissing(t *testing.T) {
 }
 
 func TestLoadImage(t *testing.T) {
-	useTestDB(t)
+	useTestDir(t)
 
-	// 0_1 (unknot) has no images -- returns (nil, kind, nil).
+	// 0_1 (unknot) has no images.
 	unknot, err := FindKnotByName("0_1")
 	if err != nil {
 		t.Fatalf("FindKnotByName(0_1): %v", err)

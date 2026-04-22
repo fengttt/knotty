@@ -1,82 +1,69 @@
 package knotdb
 
 import (
-	"database/sql"
 	"os"
 	"sync"
-
-	_ "modernc.org/sqlite"
 )
 
-// DefaultPath is the default sqlite database path, relative to the current
-// working directory. Override with SetPath or the KNOTTY_DB_PATH env var.
-const DefaultPath = "dataset/knotty.sqlite3"
+// DefaultDir is the default dataset directory, relative to the current
+// working directory. Override with SetDir or the KNOTTY_DATASET_DIR env var.
+const DefaultDir = "dataset"
 
 var (
-	pathMu  sync.Mutex
-	curPath = resolveDefaultPath()
+	dirMu  sync.Mutex
+	curDir = resolveDefaultDir()
 
-	dbMu sync.Mutex
-	curDB *sql.DB
+	infoMu  sync.Mutex
+	curInfo *knotInfo
 )
 
-func resolveDefaultPath() string {
-	if p := os.Getenv("KNOTTY_DB_PATH"); p != "" {
+func resolveDefaultDir() string {
+	if p := os.Getenv("KNOTTY_DATASET_DIR"); p != "" {
 		return p
 	}
-	return DefaultPath
+	return DefaultDir
 }
 
-// SetPath redirects knotdb to the given sqlite file. If a handle is already
-// open, it is closed so the next call reopens with the new path.
-func SetPath(p string) {
-	pathMu.Lock()
-	if curPath == p {
-		pathMu.Unlock()
-		return
+// SetDir redirects knotdb to the given dataset directory. If an in-memory
+// knot_info cache is populated, it is cleared so the next query reloads
+// from the new directory.
+func SetDir(p string) {
+	dirMu.Lock()
+	changed := curDir != p
+	curDir = p
+	dirMu.Unlock()
+
+	if changed {
+		Reset()
 	}
-	curPath = p
-	pathMu.Unlock()
-
-	_ = Close()
 }
 
-// Path returns the path knotdb will open on the next query.
-func Path() string {
-	pathMu.Lock()
-	defer pathMu.Unlock()
-	return curPath
+// Dir returns the dataset directory knotdb will read on the next query.
+func Dir() string {
+	dirMu.Lock()
+	defer dirMu.Unlock()
+	return curDir
 }
 
-// Close closes the underlying handle, if any. Safe to call multiple times.
-// The next query will reopen lazily.
-func Close() error {
-	dbMu.Lock()
-	defer dbMu.Unlock()
-	if curDB == nil {
-		return nil
+// Reset clears the in-memory knot_info cache, if any. The next lookup
+// will reload knot_info.json from disk.
+func Reset() {
+	infoMu.Lock()
+	defer infoMu.Unlock()
+	curInfo = nil
+}
+
+// info returns the lazily-loaded knot_info for the current dataset dir.
+func info() (*knotInfo, error) {
+	infoMu.Lock()
+	defer infoMu.Unlock()
+	if curInfo != nil {
+		return curInfo, nil
 	}
-	err := curDB.Close()
-	curDB = nil
-	return err
-}
-
-// db returns the lazily-opened sqlite handle for the current path.
-func db() (*sql.DB, error) {
-	dbMu.Lock()
-	defer dbMu.Unlock()
-	if curDB != nil {
-		return curDB, nil
-	}
-	pathMu.Lock()
-	p := curPath
-	pathMu.Unlock()
-
-	dsn := p + "?_pragma=busy_timeout(10000)"
-	h, err := sql.Open("sqlite", dsn)
+	ki, err := loadKnotInfoJSON(Dir())
 	if err != nil {
 		return nil, err
 	}
-	curDB = h
-	return curDB, nil
+	curInfo = ki
+	return ki, nil
 }

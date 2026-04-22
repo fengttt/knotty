@@ -1,85 +1,92 @@
 package knotdb
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	sxls "github.com/shakinm/xlsReader/xls"
-	_ "modernc.org/sqlite"
 )
 
-// KnotInfoTable is the name of the table populated by LoadKnotInfo.
-const KnotInfoTable = "knot_info"
-
-// LoadKnotInfo reads the KnotInfo xls spreadsheet at xlsPath, drops and
-// recreates the knot_info table in the current sqlite database (see SetPath),
-// and loads every data row into it.
+// BuildKnotInfoJSON reads the KnotInfo xls spreadsheet at xlsPath and
+// writes a compact knot_info.json into the current dataset directory
+// (see SetDir). Returns the number of knot rows written.
 //
-// The spreadsheet pairs each property with a description/note column; only the
-// first column of each pair is loaded, using the spreadsheet's header text as
-// the SQL column name. All columns are TEXT. Returns the number of data rows
-// inserted.
-func LoadKnotInfo(xlsPath string) (int, error) {
+// The JSON payload is a {"columns": [...], "knots": {name: {col: value}}}
+// object. Empty values are omitted from each knot's map to keep the file
+// small for sparse rows; callers get "" back from FindKnotRow for those.
+// The in-memory cache is invalidated so the next lookup reloads the
+// freshly written file.
+func BuildKnotInfoJSON(xlsPath string) (int, error) {
 	headers, data, err := readKnotInfoXLS(xlsPath)
 	if err != nil {
 		return 0, err
 	}
 
-	h, err := db()
-	if err != nil {
-		return 0, err
+	nameCol := -1
+	for i, h := range headers {
+		if h == "name" {
+			nameCol = i
+			break
+		}
+	}
+	if nameCol < 0 {
+		return 0, fmt.Errorf("xls has no 'name' column")
 	}
 
-	if _, err := h.Exec("DROP TABLE IF EXISTS " + KnotInfoTable); err != nil {
-		return 0, fmt.Errorf("drop table: %w", err)
-	}
-	if _, err := h.Exec(createTableStmt(KnotInfoTable, headers)); err != nil {
-		return 0, fmt.Errorf("create table: %w", err)
-	}
-
-	tx, err := h.Begin()
-	if err != nil {
-		return 0, err
-	}
-	stmt, err := tx.Prepare(insertStmt(KnotInfoTable, headers))
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	defer stmt.Close()
-
-	args := make([]any, len(headers))
-	inserted := 0
+	knots := make(map[string]map[string]string, len(data))
 	for r, row := range data {
-		for i := range args {
+		name := ""
+		if nameCol < len(row) {
+			name = strings.TrimSpace(row[nameCol])
+		}
+		if name == "" {
+			continue
+		}
+		if _, dup := knots[name]; dup {
+			return 0, fmt.Errorf("duplicate knot name %q at xls row %d", name, r)
+		}
+		k := make(map[string]string, len(headers))
+		for i, h := range headers {
+			var v string
 			if i < len(row) {
-				args[i] = row[i]
-			} else {
-				args[i] = ""
+				v = row[i]
+			}
+			if v != "" {
+				k[h] = v
 			}
 		}
-		if _, err := stmt.Exec(args...); err != nil {
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("insert row %d: %w", r, err)
-		}
-		inserted++
+		knots[name] = k
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
+
+	ki := knotInfo{Columns: headers, Knots: knots}
+	outPath := filepath.Join(Dir(), KnotInfoFile)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return 0, fmt.Errorf("mkdir: %w", err)
 	}
-	return inserted, nil
+	out, err := json.Marshal(ki)
+	if err != nil {
+		return 0, fmt.Errorf("marshal: %w", err)
+	}
+	if err := os.WriteFile(outPath, out, 0o644); err != nil {
+		return 0, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	Reset()
+	return len(knots), nil
 }
 
 // readKnotInfoXLS opens the xls file and extracts the schema + data rows.
 //
 // KnotInfo's spreadsheet uses two header rows:
-//   - row 0: short ASCII code names for every column (used as SQL identifiers)
+//   - row 0: short ASCII code names for every column (used as JSON keys)
 //   - row 1: human-readable labels in the even-indexed columns only
 //
-// Each property occupies two adjacent columns: the even-indexed column holds
-// the property value, the odd-indexed column holds a description/note/link.
-// We keep only the even-indexed columns of row 0 as headers and of rows 2..N
-// as data.
+// Each property occupies two adjacent columns: the even-indexed column
+// holds the property value, the odd-indexed column holds a
+// description/note/link. We keep only the even-indexed columns of row 0
+// as headers and of rows 2..N as data.
 func readKnotInfoXLS(xlsPath string) ([]string, [][]string, error) {
 	wb, err := sxls.OpenFile(xlsPath)
 	if err != nil {
@@ -123,7 +130,6 @@ func readKnotInfoXLS(xlsPath string) ([]string, [][]string, error) {
 		return nil, nil, fmt.Errorf("no header columns found in row 0")
 	}
 
-	// Data begins at row 2: row 0 = codes, row 1 = human-readable labels.
 	totalRows := sheet.GetNumberRows()
 	data := make([][]string, 0, totalRows)
 	for ri := 2; ri < totalRows; ri++ {
@@ -157,76 +163,4 @@ func isEmptyRowCells[T cellStringer](cells []T) bool {
 		}
 	}
 	return true
-}
-
-func createTableStmt(table string, headers []string) string {
-	var b strings.Builder
-	b.WriteString(`CREATE TABLE "`)
-	b.WriteString(table)
-	b.WriteString(`" (`)
-	for i, h := range headers {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(quoteIdent(h))
-		b.WriteString(" TEXT")
-	}
-	b.WriteString(")")
-	return b.String()
-}
-
-func insertStmt(table string, headers []string) string {
-	var b strings.Builder
-	b.WriteString(`INSERT INTO "`)
-	b.WriteString(table)
-	b.WriteString(`" (`)
-	for i, h := range headers {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(quoteIdent(h))
-	}
-	b.WriteString(") VALUES (")
-	for i := range headers {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString("?")
-	}
-	b.WriteString(")")
-	return b.String()
-}
-
-func quoteIdent(name string) string {
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-}
-
-// KnotInfoColumns returns the column names of the knot_info table in the
-// current sqlite database (see SetPath), in declaration order.
-func KnotInfoColumns() ([]string, error) {
-	h, err := db()
-	if err != nil {
-		return nil, err
-	}
-	rows, err := h.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, KnotInfoTable)
-	if err != nil {
-		return nil, fmt.Errorf("table_info: %w", err)
-	}
-	defer rows.Close()
-
-	var cols []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		cols = append(cols, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(cols) == 0 {
-		return nil, fmt.Errorf("table %s has no columns (does it exist?)", KnotInfoTable)
-	}
-	return cols, nil
 }
