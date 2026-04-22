@@ -88,6 +88,28 @@ func TestFindKnotRowMissing(t *testing.T) {
 	}
 }
 
+func TestRandomKnotName(t *testing.T) {
+	dbPath := useTestDB(t)
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Skipf("db not loaded yet at %s: %v", dbPath, err)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		n, err := RandomKnotName()
+		if err != nil {
+			t.Fatalf("RandomKnotName: %v", err)
+		}
+		if n == "" {
+			t.Fatal("empty name")
+		}
+		seen[n] = true
+	}
+	// With ~12966 rows, five picks should very rarely collide.
+	if len(seen) < 2 {
+		t.Errorf("expected variety across 5 picks, got %v", seen)
+	}
+}
+
 func TestLoadImageBlob(t *testing.T) {
 	dbPath := useTestDB(t)
 	if _, err := os.Stat(dbPath); err != nil {

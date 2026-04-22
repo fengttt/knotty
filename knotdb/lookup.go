@@ -91,6 +91,25 @@ func FindKnotRow(name string) (cols []string, vals []string, err error) {
 	return cols, vals, nil
 }
 
+// RandomKnotName returns the name of a randomly chosen row from knot_info.
+// Uses SQLite's built-in random() so the pick is uniform over the full
+// table. Returns ErrKnotNotFound if knot_info is empty.
+func RandomKnotName() (string, error) {
+	h, err := db()
+	if err != nil {
+		return "", err
+	}
+	var name string
+	err = h.QueryRow(`SELECT name FROM "` + KnotInfoTable + `" ORDER BY random() LIMIT 1`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrKnotNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("random knot: %w", err)
+	}
+	return name, nil
+}
+
 // LoadImageBlob reads a single image column from knot_img for the named
 // knot. Returns (nil, nil) if the row exists but the column is NULL or the
 // row does not exist. Caller is responsible for column-name validation.

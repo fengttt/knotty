@@ -33,3 +33,8 @@ dataset/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local tooling / runtime logs
+.claude/
+.mcp.json
+*.log
