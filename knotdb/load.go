@@ -1,6 +1,8 @@
 package knotdb
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,14 +13,16 @@ import (
 )
 
 // BuildKnotInfoJSON reads the KnotInfo xls spreadsheet at xlsPath and
-// writes a compact knot_info.json into the current dataset directory
+// writes a zipped knot_info.json.zip into the current dataset directory
 // (see SetDir). Returns the number of knot rows written.
 //
 // The JSON payload is a {"columns": [...], "knots": {name: {col: value}}}
 // object. Empty values are omitted from each knot's map to keep the file
 // small for sparse rows; callers get "" back from FindKnotRow for those.
-// The in-memory cache is invalidated so the next lookup reloads the
-// freshly written file.
+// The JSON is then stored as the sole entry (knot_info.json) inside a
+// zip archive — at ~7x compression this dramatically shrinks the file
+// we ship and fetch over HTTP from wasm builds. The in-memory cache is
+// invalidated so the next lookup reloads the freshly written file.
 func BuildKnotInfoJSON(xlsPath string) (int, error) {
 	headers, data, err := readKnotInfoXLS(xlsPath)
 	if err != nil {
@@ -66,11 +70,25 @@ func BuildKnotInfoJSON(xlsPath string) (int, error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir: %w", err)
 	}
-	out, err := json.Marshal(ki)
+	raw, err := json.Marshal(ki)
 	if err != nil {
 		return 0, fmt.Errorf("marshal: %w", err)
 	}
-	if err := os.WriteFile(outPath, out, 0o644); err != nil {
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	entry, err := zw.Create(KnotInfoJSONEntry)
+	if err != nil {
+		return 0, fmt.Errorf("zip entry: %w", err)
+	}
+	if _, err := entry.Write(raw); err != nil {
+		return 0, fmt.Errorf("zip write: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return 0, fmt.Errorf("zip close: %w", err)
+	}
+
+	if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
 		return 0, fmt.Errorf("write %s: %w", outPath, err)
 	}
 	Reset()
