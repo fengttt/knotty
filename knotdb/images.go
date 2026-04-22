@@ -1,10 +1,7 @@
 package knotdb
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 )
 
@@ -45,9 +42,9 @@ func LoadImageBlob(name, style string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if isNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read %s: %w", path, err)

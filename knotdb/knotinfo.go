@@ -3,7 +3,6 @@ package knotdb
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 )
@@ -29,7 +28,7 @@ type knotInfo struct {
 // loadKnotInfoJSON reads dir/knot_info.json and builds an indexed knotInfo.
 func loadKnotInfoJSON(dir string) (*knotInfo, error) {
 	p := filepath.Join(dir, KnotInfoFile)
-	data, err := os.ReadFile(p)
+	data, err := readFile(p)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", p, err)
 	}
