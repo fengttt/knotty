@@ -531,6 +531,49 @@ func matchEndpoints(thick *pixbuf, points []image.Point) [][2]int {
 			}
 		}
 	}
+	// Uncrossing pass: score-based 2-opt only swaps on strict improvement,
+	// so a matching whose minimum-score assignment happens to be the
+	// self-crossing one among the three ways to pair 4 points will remain
+	// crossing. For 4 points in general position, exactly one of the three
+	// partitionings is self-crossing, so an alternative always exists.
+	// Accept a higher score to trade crossings away.
+	for changed := true; changed; {
+		changed = false
+		for i := 0; i < len(edges); i++ {
+			for j := i + 1; j < len(edges); j++ {
+				p1, p2 := edges[i][0], edges[i][1]
+				q1, q2 := edges[j][0], edges[j][1]
+				if _, ok := segmentsIntersect(
+					fpt(points[p1]), fpt(points[p2]),
+					fpt(points[q1]), fpt(points[q2])); !ok {
+					continue
+				}
+				type opt struct {
+					a1, a2, b1, b2 int
+					score          float64
+				}
+				opts := []opt{
+					{p1, q1, p2, q2, graph[p1][q1] + graph[p2][q2]},
+					{p1, q2, p2, q1, graph[p1][q2] + graph[p2][q1]},
+				}
+				sort.Slice(opts, func(a, b int) bool { return opts[a].score < opts[b].score })
+				for _, o := range opts {
+					if math.IsInf(o.score, 1) {
+						continue
+					}
+					if _, ok := segmentsIntersect(
+						fpt(points[o.a1]), fpt(points[o.a2]),
+						fpt(points[o.b1]), fpt(points[o.b2])); ok {
+						continue
+					}
+					edges[i] = [2]int{o.a1, o.a2}
+					edges[j] = [2]int{o.b1, o.b2}
+					changed = true
+					break
+				}
+			}
+		}
+	}
 	return edges
 }
 

@@ -55,6 +55,16 @@ func TestConvertCrossingCount(t *testing.T) {
 	}
 }
 
+// TestConvert10_42Mirror exercises the mirror diagram of 10_42 — the
+// first knot that forced the snap-to-nearest-edge fallback for the
+// non-mirror PNG. Mirroring swaps over/under at every crossing, so the
+// skeleton has a different shape near the problematic short-match gap,
+// and this guards against regressions specific to the mirror rendering.
+func TestConvert10_42Mirror(t *testing.T) {
+	setupTestDataset(t)
+	checkConvertCrossings(t, "10_42", knot.StyleDiagramMirror)
+}
+
 // TestConvertArcOverUnderBalance checks that the number of over
 // arc-endpoints equals the number of under arc-endpoints. At every
 // crossing 4 arc-endpoints meet (2 from the over strand, 2 from the
