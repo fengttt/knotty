@@ -1,9 +1,10 @@
 // Command knotty is the Ebiten-based GUI for exploring the KnotInfo
 // database. The window is 9:16 portrait: a full-width square image of
 // the knot on top, and a scrollable properties panel underneath. The
-// panel hosts the search input, Search/Refresh buttons, the image-style
-// dropdown (Diagram, DiagramMirror, Snappy, SnappyMirror, Grid), the
-// knot name, and the raw column values for the current Diagram.
+// panel hosts the search input, Search/Convert/Debug buttons, the
+// image-style dropdown (Diagram, DiagramMirror, Snappy, SnappyMirror,
+// Grid), the knot name, and the raw column values for the current
+// Diagram.
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	stdimage "image"
 	"image/color"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -19,7 +21,6 @@ import (
 	uiimage "github.com/ebitenui/ebitenui/image"
 	"github.com/ebitenui/ebitenui/widget"
 	"github.com/fengttt/knotty/knot"
-	"github.com/fengttt/knotty/knotdb"
 	"github.com/hajimehoshi/ebiten/v2"
 	etext "github.com/hajimehoshi/ebiten/v2/text/v2"
 	"golang.org/x/image/font/gofont/goregular"
@@ -165,6 +166,7 @@ func (g *game) buildTopPane() *widget.Container {
 		}),
 		widget.WidgetOpts.MinSize(windowWidth, windowWidth),
 	)
+	g.imageWidget.DebugFace = g.face
 	top.AddChild(g.imageWidget)
 	return top
 }
@@ -282,20 +284,6 @@ func (g *game) buildSearchRow() *widget.Container {
 	)
 	row.AddChild(searchBtn)
 
-	refreshBtn := widget.NewButton(
-		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
-			widget.WidgetOpts.MinSize(80, 32),
-		),
-		widget.ButtonOpts.Image(buttonImage()),
-		widget.ButtonOpts.Text("Refresh", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
-		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 6, Bottom: 6}),
-		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
-			g.doRefresh()
-		}),
-	)
-	row.AddChild(refreshBtn)
-
 	convertBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
 			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
@@ -309,6 +297,20 @@ func (g *game) buildSearchRow() *widget.Container {
 		}),
 	)
 	row.AddChild(convertBtn)
+
+	debugBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+			widget.WidgetOpts.MinSize(70, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Text("Debug", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
+		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 6, Bottom: 6}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.doDebug()
+		}),
+	)
+	row.AddChild(debugBtn)
 
 	row.AddChild(g.buildStyleCombo())
 
@@ -372,19 +374,31 @@ func (g *game) buildBottomPane() *widget.Container {
 	return bottom
 }
 
-// doSearch handles the search button / Enter key: look up name, or pick
-// a random knot if the query is empty or only whitespace.
+// doSearch handles the search button / Enter key. An empty query
+// clears the image, properties, and search box, and labels the name
+// as "Drawing" — a blank canvas state. Non-empty queries look up the
+// KnotInfo row by name.
 func (g *game) doSearch(q string) {
 	q = trim(q)
 	if q == "" {
-		name, err := knotdb.RandomKnotName()
-		if err != nil {
-			g.propsArea.SetText(fmt.Sprintf("random: %v", err))
-			return
-		}
-		q = name
+		g.enterDrawingMode()
+		return
 	}
 	g.loadKnot(q)
+}
+
+// enterDrawingMode puts the UI into a nameless "Drawing" state: no
+// current knot, no image, no properties text, and the name label
+// shows "Drawing". The debug overlay is cleared as well.
+func (g *game) enterDrawingMode() {
+	g.currentKnot = nil
+	g.currentRaster = nil
+	g.imageWidget.Image = nil
+	g.imageWidget.DebugCrossings = nil
+	g.imageWidget.DebugArcs = nil
+	g.input.SetText("")
+	g.nameLabel.Label = "Drawing"
+	g.propsArea.SetText("")
 }
 
 // loadKnot looks the name up, updates widgets.
@@ -400,19 +414,6 @@ func (g *game) loadKnot(name string) {
 	g.input.SetText(k.GetName())
 	g.refreshImage()
 	g.refreshProperties()
-}
-
-// doRefresh re-renders the properties area and appends a "refreshed at"
-// timestamp line at the bottom. The underlying Diagram is not reloaded —
-// this is a no-op besides the timestamp.
-func (g *game) doRefresh() {
-	g.refreshProperties()
-	if g.currentKnot == nil {
-		return
-	}
-	cur := g.propsArea.GetText()
-	cur += "refreshed at " + time.Now().Format("2006-01-02 15:04:05") + "\n"
-	g.propsArea.SetText(cur)
 }
 
 // refreshImage re-loads the current knot's image for the current style.
@@ -437,49 +438,122 @@ func (g *game) refreshImage() {
 	}
 	g.imageWidget.Image = img
 	g.currentRaster = raster
+	g.imageWidget.DebugCrossings = nil
+	g.imageWidget.DebugArcs = nil
 }
 
-// doConvert runs the knotfolio-style "Convert to diagram" pipeline over
-// the currently displayed raster and appends a summary (crossing count,
-// arc count, first few crossing positions) to the properties area.
-func (g *game) doConvert() {
+// doDebug toggles the diagram-overlay debug view. The first click runs
+// convertImage over the current raster and overlays a red circle at
+// each detected crossing plus a blue × at each arc's midpoint; the
+// second click clears the overlay.
+func (g *game) doDebug() {
+	if g.imageWidget == nil {
+		return
+	}
+	if len(g.imageWidget.DebugCrossings) > 0 || len(g.imageWidget.DebugArcs) > 0 {
+		g.imageWidget.DebugCrossings = nil
+		g.imageWidget.DebugArcs = nil
+		return
+	}
 	if g.currentRaster == nil {
-		g.propsArea.SetText(g.propsArea.GetText() + "convert: no image loaded\n")
+		g.propsArea.SetText(g.propsArea.GetText() + "debug: no image loaded\n")
 		return
 	}
 	d, err := convertImage(g.currentRaster)
-	cur := g.propsArea.GetText()
 	if err != nil {
-		g.propsArea.SetText(cur + fmt.Sprintf("convert failed: %v\n", err))
+		g.propsArea.SetText(g.propsArea.GetText() + fmt.Sprintf("debug: convert failed: %v\n", err))
+		return
+	}
+	g.imageWidget.DebugCrossings = append([]stdimage.Point(nil), d.Crossings...)
+	marks := make([]debugArcMark, len(d.Arcs))
+	for i, a := range d.Arcs {
+		marks[i] = debugArcMark{
+			At:   arcMidpoint(a.Polyline),
+			Info: fmt.Sprintf("A%d: C%d(%s) → C%d(%s)", i, a.Start.Crossing, overLabel(a.Start.Over), a.End.Crossing, overLabel(a.End.Over)),
+		}
+	}
+	g.imageWidget.DebugArcs = marks
+}
+
+func overLabel(over bool) string {
+	if over {
+		return "over"
+	}
+	return "under"
+}
+
+// arcMidpoint returns the point at the path-length midpoint of the
+// polyline, interpolated along whichever segment contains the half-
+// distance mark. For polylines of length 0 or 1, returns the first
+// point (or zero).
+func arcMidpoint(poly []stdimage.Point) stdimage.Point {
+	if len(poly) == 0 {
+		return stdimage.Point{}
+	}
+	if len(poly) == 1 {
+		return poly[0]
+	}
+	segs := make([]float64, len(poly)-1)
+	total := 0.0
+	for i := range segs {
+		dx := float64(poly[i+1].X - poly[i].X)
+		dy := float64(poly[i+1].Y - poly[i].Y)
+		segs[i] = math.Hypot(dx, dy)
+		total += segs[i]
+	}
+	half := total / 2
+	acc := 0.0
+	for i, s := range segs {
+		if acc+s >= half {
+			t := 0.0
+			if s > 0 {
+				t = (half - acc) / s
+			}
+			x := float64(poly[i].X) + t*float64(poly[i+1].X-poly[i].X)
+			y := float64(poly[i].Y) + t*float64(poly[i+1].Y-poly[i].Y)
+			return stdimage.Point{X: int(x + 0.5), Y: int(y + 0.5)}
+		}
+		acc += s
+	}
+	return poly[len(poly)-1]
+}
+
+// doConvert runs the knotfolio-style "Convert to diagram" pipeline
+// over the currently displayed raster and replaces the properties
+// area with a summary (crossing count, arc count, per-crossing and
+// per-arc details). The knot name is re-labelled "Drawing" since the
+// on-screen content is now the converted diagram rather than a named
+// KnotInfo row.
+func (g *game) doConvert() {
+	if g.currentRaster == nil {
+		g.nameLabel.Label = "Drawing"
+		g.propsArea.SetText("convert: no image loaded\n")
+		return
+	}
+	d, err := convertImage(g.currentRaster)
+	g.nameLabel.Label = "Drawing"
+	if err != nil {
+		g.propsArea.SetText(fmt.Sprintf("convert failed: %v\n", err))
 		return
 	}
 	var b strings.Builder
-	b.WriteString(cur)
-	b.WriteString(fmt.Sprintf("--- converted at %s ---\n", time.Now().Format("15:04:05")))
-	b.WriteString(fmt.Sprintf("crossings: %d\n", len(d.Crossings)))
-	b.WriteString(fmt.Sprintf("arcs:      %d\n", len(d.Arcs)))
+	fmt.Fprintf(&b, "converted at %s\n", time.Now().Format("15:04:05"))
+	fmt.Fprintf(&b, "crossings: %d\n", len(d.Crossings))
+	fmt.Fprintf(&b, "arcs:      %d\n", len(d.Arcs))
 	for i, c := range d.Crossings {
 		if i >= 8 {
-			b.WriteString(fmt.Sprintf("  ... (%d more)\n", len(d.Crossings)-i))
+			fmt.Fprintf(&b, "  ... (%d more)\n", len(d.Crossings)-i)
 			break
 		}
-		b.WriteString(fmt.Sprintf("  C%d = (%d,%d)\n", i, c.X, c.Y))
+		fmt.Fprintf(&b, "  C%d = (%d,%d)\n", i, c.X, c.Y)
 	}
 	for i, a := range d.Arcs {
 		if i >= 8 {
-			b.WriteString(fmt.Sprintf("  ... (%d more arcs)\n", len(d.Arcs)-i))
+			fmt.Fprintf(&b, "  ... (%d more arcs)\n", len(d.Arcs)-i)
 			break
 		}
-		startStr := "over"
-		if !a.Start.Over {
-			startStr = "under"
-		}
-		endStr := "over"
-		if !a.End.Over {
-			endStr = "under"
-		}
-		b.WriteString(fmt.Sprintf("  A%d: C%d(%s) -> C%d(%s), %d pts\n",
-			i, a.Start.Crossing, startStr, a.End.Crossing, endStr, len(a.Polyline)))
+		fmt.Fprintf(&b, "  A%d: C%d(%s) -> C%d(%s), %d pts\n",
+			i, a.Start.Crossing, overLabel(a.Start.Over), a.End.Crossing, overLabel(a.End.Over), len(a.Polyline))
 	}
 	g.propsArea.SetText(b.String())
 }

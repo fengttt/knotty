@@ -2,10 +2,21 @@ package main
 
 import (
 	"image"
+	"image/color"
+	"strconv"
 
 	"github.com/ebitenui/ebitenui/widget"
 	"github.com/hajimehoshi/ebiten/v2"
+	etext "github.com/hajimehoshi/ebiten/v2/text/v2"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
+
+// debugArcMark is an overlay marker placed at an arc's midpoint. Info
+// is the tooltip text displayed when the cursor hovers over the mark.
+type debugArcMark struct {
+	At   image.Point
+	Info string
+}
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
 // uniformly scaled to fit inside its allocated Rect, preserving aspect
@@ -14,6 +25,21 @@ import (
 // space on the long axis.
 type scaledImage struct {
 	Image *ebiten.Image
+
+	// DebugCrossings are points in the source image's pixel coordinates
+	// to overlay as circles (used by the Debug button). Coordinates are
+	// transformed through the same scale/offset used to draw Image.
+	// Each point is labelled with its index in this slice.
+	DebugCrossings []image.Point
+
+	// DebugArcs are arc midpoints (in source image's pixel coordinates),
+	// drawn as small × marks. Each carries a tooltip string shown on
+	// hover (typically the arc endpoints and over/under flags).
+	DebugArcs []debugArcMark
+
+	// DebugFace is the font face used to render crossing index labels.
+	// When nil, labels are skipped.
+	DebugFace etext.Face
 
 	widgetOpts []widget.WidgetOpt
 	init       *widget.MultiOnce
@@ -100,4 +126,70 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	opts.GeoM.Scale(scale, scale)
 	opts.GeoM.Translate(ox, oy)
 	screen.DrawImage(s.Image, &opts)
+
+	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 {
+		return
+	}
+	r := float32(8)
+	if rr := float32(iw) * 0.02 * float32(scale); rr > r {
+		r = rr
+	}
+	clrCross := color.NRGBA{0xff, 0x40, 0x40, 0xff}
+	clrArc := color.NRGBA{0x40, 0xc0, 0xff, 0xff}
+	mx, my := ebiten.CursorPosition()
+
+	// Arc × mark is half the circle radius; hover hit-box matches.
+	armLen := r * 0.55
+	hoverText := ""
+	hoverD2 := r * r
+
+	for i, p := range s.DebugCrossings {
+		cx := float32(ox) + float32(p.X)*float32(scale)
+		cy := float32(oy) + float32(p.Y)*float32(scale)
+		vector.StrokeCircle(screen, cx, cy, r, 2, clrCross, true)
+		dx, dy := float32(mx)-cx, float32(my)-cy
+		if d2 := dx*dx + dy*dy; d2 < hoverD2 {
+			hoverText = strconv.Itoa(i)
+			hoverD2 = d2
+		}
+	}
+	for _, m := range s.DebugArcs {
+		cx := float32(ox) + float32(m.At.X)*float32(scale)
+		cy := float32(oy) + float32(m.At.Y)*float32(scale)
+		vector.StrokeLine(screen, cx-armLen, cy-armLen, cx+armLen, cy+armLen, 2, clrArc, true)
+		vector.StrokeLine(screen, cx-armLen, cy+armLen, cx+armLen, cy-armLen, 2, clrArc, true)
+		dx, dy := float32(mx)-cx, float32(my)-cy
+		if d2 := dx*dx + dy*dy; d2 < hoverD2 {
+			hoverText = m.Info
+			hoverD2 = d2
+		}
+	}
+	if hoverText != "" && s.DebugFace != nil {
+		s.drawTooltip(screen, hoverText, mx, my)
+	}
+}
+
+// drawTooltip renders a small label near the cursor. Positioned
+// slightly up-and-right from the cursor so it doesn't occlude the
+// marker being pointed at; clamped to stay on-screen.
+func (s *scaledImage) drawTooltip(screen *ebiten.Image, label string, mx, my int) {
+	padX, padY := float32(6), float32(3)
+	w, h := etext.Measure(label, s.DebugFace, 0)
+	bw := float32(w) + 2*padX
+	bh := float32(h) + 2*padY
+	bx := float32(mx) + 12
+	by := float32(my) - bh - 4
+	sb := screen.Bounds()
+	if bx+bw > float32(sb.Max.X) {
+		bx = float32(sb.Max.X) - bw
+	}
+	if by < float32(sb.Min.Y) {
+		by = float32(my) + 12
+	}
+	vector.FillRect(screen, bx, by, bw, bh, color.NRGBA{0x20, 0x20, 0x28, 0xe8}, true)
+	vector.StrokeRect(screen, bx, by, bw, bh, 1, color.NRGBA{0xff, 0xff, 0xff, 0x80}, true)
+	opts := &etext.DrawOptions{}
+	opts.GeoM.Translate(float64(bx+padX), float64(by+padY))
+	opts.ColorScale.ScaleWithColor(color.NRGBA{240, 240, 240, 255})
+	etext.Draw(screen, label, s.DebugFace, opts)
 }
