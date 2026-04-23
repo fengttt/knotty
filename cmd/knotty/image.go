@@ -16,25 +16,26 @@ import (
 // used at their native size.
 const rasterSize = 600
 
-// decodeKnotImage decodes the raw bytes of a knot image into an
-// *ebiten.Image. PNG uses the standard library; SVG is rasterized via
-// oksvg + rasterx at rasterSize x rasterSize. Returns (nil, nil) when
-// data is empty (the knot has no stored image for this style).
-func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, error) {
+// decodeKnotImage decodes the raw bytes of a knot image into both an
+// *ebiten.Image (for display) and the underlying image.Image (for CPU-side
+// pixel access in convertImage). PNG uses the standard library; SVG is
+// rasterized via oksvg + rasterx at rasterSize x rasterSize. Returns
+// (nil, nil, nil) when data is empty.
+func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, image.Image, error) {
 	if len(data) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	switch kind {
 	case knot.PNG:
 		img, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
-			return nil, fmt.Errorf("decode png: %w", err)
+			return nil, nil, fmt.Errorf("decode png: %w", err)
 		}
-		return ebiten.NewImageFromImage(img), nil
+		return ebiten.NewImageFromImage(img), img, nil
 	case knot.SVG:
 		icon, err := oksvg.ReadIconStream(bytes.NewReader(data))
 		if err != nil {
-			return nil, fmt.Errorf("read svg: %w", err)
+			return nil, nil, fmt.Errorf("read svg: %w", err)
 		}
 		w, h := rasterSize, rasterSize
 		icon.SetTarget(0, 0, float64(w), float64(h))
@@ -42,9 +43,9 @@ func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, error) {
 		scanner := rasterx.NewScannerGV(w, h, rgba, rgba.Bounds())
 		dasher := rasterx.NewDasher(w, h, scanner)
 		icon.Draw(dasher, 1.0)
-		return ebiten.NewImageFromImage(rgba), nil
+		return ebiten.NewImageFromImage(rgba), rgba, nil
 	default:
-		return nil, fmt.Errorf("unknown image kind %q", kind)
+		return nil, nil, fmt.Errorf("unknown image kind %q", kind)
 	}
 }
 

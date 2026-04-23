@@ -56,8 +56,9 @@ type game struct {
 	nameLabel   *widget.Text
 	propsArea   *widget.TextArea
 
-	currentKnot  *knot.Diagram
-	currentStyle knot.ImageType
+	currentKnot   *knot.Diagram
+	currentStyle  knot.ImageType
+	currentRaster stdimage.Image
 
 	face     etext.Face
 	hugeFace etext.Face
@@ -295,6 +296,20 @@ func (g *game) buildSearchRow() *widget.Container {
 	)
 	row.AddChild(refreshBtn)
 
+	convertBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+			widget.WidgetOpts.MinSize(80, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Text("Convert", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
+		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 6, Bottom: 6}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.doConvert()
+		}),
+	)
+	row.AddChild(convertBtn)
+
 	row.AddChild(g.buildStyleCombo())
 
 	return row
@@ -410,15 +425,63 @@ func (g *game) refreshImage() {
 	if err != nil {
 		log.Printf("load image: %v", err)
 		g.imageWidget.Image = nil
+		g.currentRaster = nil
 		return
 	}
-	img, err := decodeKnotImage(data, kind)
+	img, raster, err := decodeKnotImage(data, kind)
 	if err != nil {
 		log.Printf("decode image: %v", err)
 		g.imageWidget.Image = nil
+		g.currentRaster = nil
 		return
 	}
 	g.imageWidget.Image = img
+	g.currentRaster = raster
+}
+
+// doConvert runs the knotfolio-style "Convert to diagram" pipeline over
+// the currently displayed raster and appends a summary (crossing count,
+// arc count, first few crossing positions) to the properties area.
+func (g *game) doConvert() {
+	if g.currentRaster == nil {
+		g.propsArea.SetText(g.propsArea.GetText() + "convert: no image loaded\n")
+		return
+	}
+	d, err := convertImage(g.currentRaster)
+	cur := g.propsArea.GetText()
+	if err != nil {
+		g.propsArea.SetText(cur + fmt.Sprintf("convert failed: %v\n", err))
+		return
+	}
+	var b strings.Builder
+	b.WriteString(cur)
+	b.WriteString(fmt.Sprintf("--- converted at %s ---\n", time.Now().Format("15:04:05")))
+	b.WriteString(fmt.Sprintf("crossings: %d\n", len(d.Crossings)))
+	b.WriteString(fmt.Sprintf("arcs:      %d\n", len(d.Arcs)))
+	for i, c := range d.Crossings {
+		if i >= 8 {
+			b.WriteString(fmt.Sprintf("  ... (%d more)\n", len(d.Crossings)-i))
+			break
+		}
+		b.WriteString(fmt.Sprintf("  C%d = (%d,%d)\n", i, c.X, c.Y))
+	}
+	for i, a := range d.Arcs {
+		if i >= 8 {
+			b.WriteString(fmt.Sprintf("  ... (%d more arcs)\n", len(d.Arcs)-i))
+			break
+		}
+		startStr := "over"
+		if !a.Start.Over {
+			startStr = "under"
+		}
+		endStr := "over"
+		if !a.End.Over {
+			endStr = "under"
+		}
+		b.WriteString(fmt.Sprintf("  A%d: C%d(%s) -> C%d(%s), %d pts\n",
+			i, a.Start.Crossing, startStr, a.End.Crossing, endStr, len(a.Polyline)))
+	}
+	g.propsArea.SetText(b.String())
 }
 
 // refreshProperties renders every Diagram property (except name, shown
