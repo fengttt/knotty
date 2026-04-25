@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	_ "embed"
 	"image/color"
+	"log"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	etext "github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
@@ -11,52 +15,43 @@ import (
 // button's GraphicPadding adds visual breathing room around it.
 const iconSize = 24
 
-// pencilIcon draws a small pencil glyph: a diagonal yellow shaft
-// running from top-right (sharpened tip) to bottom-left (eraser end),
-// with a dark lead point at the tip and a pink stub at the back.
-func pencilIcon() *ebiten.Image {
+// notoSymbolsTTF supplies U+1F589 (LOWER LEFT PENCIL) and other
+// pictographic code points that the Go font (goregular) does not cover.
+// The bundled font is Noto Sans Symbols 2 (SIL OFL).
+//
+//go:embed NotoSansSymbols2-Regular.ttf
+var notoSymbolsTTF []byte
+
+var symbolFace etext.Face
+
+func init() {
+	src, err := etext.NewGoTextFaceSource(bytes.NewReader(notoSymbolsTTF))
+	if err != nil {
+		log.Fatalf("load symbols font: %v", err)
+	}
+	symbolFace = &etext.GoTextFace{Source: src, Size: 20}
+}
+
+// glyphIcon renders a single rune from the embedded symbols font,
+// centered in a 24×24 image and tinted to the given color.
+func glyphIcon(glyph string, c color.Color) *ebiten.Image {
 	img := ebiten.NewImage(iconSize, iconSize)
-	yellow := color.NRGBA{0xe8, 0xc2, 0x40, 0xff}
-	dark := color.NRGBA{0x20, 0x20, 0x20, 0xff}
-	pink := color.NRGBA{0xe0, 0x80, 0x90, 0xff}
-	silver := color.NRGBA{0xb8, 0xb8, 0xc0, 0xff}
-	outline := color.NRGBA{0x10, 0x10, 0x10, 0xc0}
-
-	// Yellow shaft — thick stroked line along the 45° diagonal.
-	vector.StrokeLine(img, 7, 17, 17, 7, 5, yellow, true)
-	// Outline of shaft so it reads against the grey button.
-	vector.StrokeLine(img, 7, 17, 17, 7, 6, outline, true)
-	vector.StrokeLine(img, 7, 17, 17, 7, 4, yellow, true)
-
-	// Lead point (dark) at the upper-right.
-	vector.FillCircle(img, 19, 5, 2, dark, true)
-	// Wood cone shoulder transitions into the lead point.
-	vector.FillCircle(img, 17, 7, 1.5, color.NRGBA{0xd8, 0xa8, 0x60, 0xff}, true)
-
-	// Silver ferrule between shaft and eraser.
-	vector.FillCircle(img, 7, 17, 2, silver, true)
-	// Pink eraser stub at the lower-left.
-	vector.FillCircle(img, 5, 19, 2.5, pink, true)
-	vector.StrokeCircle(img, 5, 19, 2.5, 1, outline, true)
+	w, h := etext.Measure(glyph, symbolFace, 0)
+	opts := &etext.DrawOptions{}
+	opts.GeoM.Translate((float64(iconSize)-w)/2, (float64(iconSize)-h)/2)
+	opts.ColorScale.ScaleWithColor(c)
+	etext.Draw(img, glyph, symbolFace, opts)
 	return img
 }
 
-// eraserIcon draws a chunky rectangular eraser, rotated slightly off
-// the axis so it doesn't look like just a colored block.
-func eraserIcon() *ebiten.Image {
-	img := ebiten.NewImage(iconSize, iconSize)
-	pink := color.NRGBA{0xe8, 0x90, 0xa0, 0xff}
-	dark := color.NRGBA{0xa8, 0x60, 0x70, 0xff}
-	border := color.NRGBA{0x30, 0x30, 0x30, 0xff}
+// pencilIcon renders U+1F589 (LOWER LEFT PENCIL) in bright yellow.
+func pencilIcon() *ebiten.Image {
+	return glyphIcon("\U0001F589", color.NRGBA{0xff, 0xee, 0x80, 0xff})
+}
 
-	// Body — split top/bottom for the classic two-tone look.
-	vector.FillRect(img, 4, 8, 16, 5, pink, true)
-	vector.FillRect(img, 4, 13, 16, 5, dark, true)
-	vector.StrokeRect(img, 4, 8, 16, 10, 1.5, border, true)
-	// A short sweep mark trailing off the right edge to suggest erasing.
-	vector.StrokeLine(img, 20, 14, 23, 16, 1.5, color.NRGBA{0x60, 0x60, 0x70, 0xff}, true)
-	vector.StrokeLine(img, 20, 17, 23, 19, 1.5, color.NRGBA{0x60, 0x60, 0x70, 0xff}, true)
-	return img
+// eraserIcon renders U+232B (ERASE TO THE LEFT) in bright pink.
+func eraserIcon() *ebiten.Image {
+	return glyphIcon("⌫", color.NRGBA{0xff, 0x90, 0xb0, 0xff})
 }
 
 // colorSwatchIcon draws a single filled circle in the given color with
@@ -76,5 +71,5 @@ func colorSwatchIcon(c color.Color) *ebiten.Image {
 func paintColorSwatch(img *ebiten.Image, c color.Color) {
 	img.Clear()
 	vector.FillCircle(img, iconSize/2, iconSize/2, 9, c, true)
-	vector.StrokeCircle(img, iconSize/2, iconSize/2, 9, 1.5, color.NRGBA{0x20, 0x20, 0x20, 0xff}, true)
+	vector.StrokeCircle(img, iconSize/2, iconSize/2, 9, 1.5, color.NRGBA{0xff, 0xff, 0xff, 0xff}, true)
 }
