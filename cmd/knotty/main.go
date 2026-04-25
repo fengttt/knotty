@@ -47,6 +47,26 @@ var styleEntries = []styleEntry{
 	{"Grid", knot.StyleGrid},
 }
 
+// colorEntry is one of the palette colors offered by the pencil color
+// dropdown. The canvas background is white so white is intentionally
+// excluded from the palette (use the eraser for that).
+type colorEntry struct {
+	label string
+	c     color.NRGBA
+}
+
+var colorEntries = []colorEntry{
+	{"Black", color.NRGBA{0, 0, 0, 0xff}},
+	{"Red", color.NRGBA{0xd0, 0x20, 0x20, 0xff}},
+	{"Blue", color.NRGBA{0x20, 0x40, 0xc0, 0xff}},
+	{"Green", color.NRGBA{0x20, 0xa0, 0x30, 0xff}},
+	{"Yellow", color.NRGBA{0xe0, 0xc0, 0x20, 0xff}},
+}
+
+var (
+	canvasBG = color.NRGBA{0xff, 0xff, 0xff, 0xff}
+)
+
 // game implements ebiten.Game and owns the UI.
 type game struct {
 	ui *ebitenui.UI
@@ -57,9 +77,22 @@ type game struct {
 	nameLabel   *widget.Text
 	propsArea   *widget.TextArea
 
-	currentKnot   *knot.Diagram
-	currentStyle  knot.ImageType
-	currentRaster stdimage.Image
+	// colorSwatch is the single mutable *ebiten.Image used as the trigger
+	// button's graphic. ebitenui's Button captures GraphicImage.Idle once
+	// at construction (auto-update only fires for buttons with text), so
+	// to refresh the displayed color we repaint THIS image rather than
+	// swap the pointer.
+	colorSwatch *ebiten.Image
+	colorIndex  int
+	// colorBtn is the trigger button; we need its widget Rect to
+	// position the popup just below it.
+	colorBtn *widget.Button
+	// colorPopupClose, when non-nil, removes the open color popup.
+	// Set to nil when the popup is closed (manually or by CLICK_OUT).
+	colorPopupClose widget.RemoveWindowFunc
+
+	currentKnot  *knot.Diagram
+	currentStyle knot.ImageType
 
 	face     etext.Face
 	hugeFace etext.Face
@@ -80,6 +113,7 @@ func main() {
 	g.hugeFace = hugeFace
 
 	g.ui = g.buildUI()
+	g.initCanvas()
 
 	// Seed with the figure-eight knot so the window opens with a
 	// recognizable diagram.
@@ -151,9 +185,15 @@ func (g *game) buildTopPane() *widget.Container {
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x22, 0x22, 0x2a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
 			widget.GridLayoutOpts.Columns(1),
-			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{true}),
+			// Toolbar row is content-sized; canvas row takes the full
+			// square below it.
+			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
+			widget.GridLayoutOpts.Spacing(0, 4),
+			widget.GridLayoutOpts.Padding(&widget.Insets{Top: 4, Bottom: 0, Left: 4, Right: 4}),
 		)),
 	)
+
+	top.AddChild(g.buildDrawToolbar())
 
 	// Full-width square: the image cell's MinWidth / MinHeight are updated
 	// every frame in game.Layout so the square follows the current window
@@ -167,8 +207,136 @@ func (g *game) buildTopPane() *widget.Container {
 		widget.WidgetOpts.MinSize(windowWidth, windowWidth),
 	)
 	g.imageWidget.DebugFace = g.face
+	g.imageWidget.DrawEnabled = true
+	g.imageWidget.Tool = ToolPencil
+	g.imageWidget.BrushColor = colorEntries[0].c
+	g.imageWidget.BrushSize = 3
 	top.AddChild(g.imageWidget)
 	return top
+}
+
+// buildDrawToolbar is the row of drawing controls — pencil and eraser
+// icon buttons plus a color combo whose trigger displays the currently
+// selected color as a filled circle.
+func (g *game) buildDrawToolbar() *widget.Container {
+	row := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewRowLayout(
+			widget.RowLayoutOpts.Direction(widget.DirectionHorizontal),
+			widget.RowLayoutOpts.Spacing(6),
+		)),
+	)
+
+	row.AddChild(iconButton(pencilIcon(), func() {
+		g.imageWidget.Tool = ToolPencil
+	}))
+	row.AddChild(iconButton(eraserIcon(), func() {
+		g.imageWidget.Tool = ToolEraser
+	}))
+	row.AddChild(g.buildColorCombo())
+	return row
+}
+
+// iconButton is a 36×32 toolbar button whose face is a single icon
+// image, with a small inset around the glyph.
+func iconButton(icon *ebiten.Image, onClick func()) *widget.Button {
+	return widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+			widget.WidgetOpts.MinSize(36, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Graphic(&widget.GraphicImage{Idle: icon}),
+		widget.ButtonOpts.GraphicPadding(widget.Insets{Left: 4, Right: 4, Top: 4, Bottom: 4}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			onClick()
+		}),
+	)
+}
+
+// buildColorCombo builds the pencil-color trigger. The button face is
+// a filled circle in the current color; clicking it opens a popup
+// (ebitenui Window) of one circle button per palette entry. The popup
+// closes when a color is selected or when the user clicks outside it.
+//
+// ebitenui's ListComboButton only renders text in popup entries, so we
+// drop the combo entirely and manage the popup window ourselves.
+func (g *game) buildColorCombo() *widget.Button {
+	g.colorIndex = 0
+	g.colorSwatch = ebiten.NewImage(iconSize, iconSize)
+	paintColorSwatch(g.colorSwatch, colorEntries[g.colorIndex].c)
+	g.colorBtn = widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+			widget.WidgetOpts.MinSize(36, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Graphic(&widget.GraphicImage{Idle: g.colorSwatch}),
+		widget.ButtonOpts.GraphicPadding(widget.Insets{Left: 4, Right: 4, Top: 4, Bottom: 4}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.toggleColorPopup()
+		}),
+	)
+	return g.colorBtn
+}
+
+// toggleColorPopup opens (or closes) the color-picker popup window,
+// positioned just below the trigger button. Selecting a color updates
+// the brush, refreshes the trigger swatch, and dismisses the popup.
+func (g *game) toggleColorPopup() {
+	if g.colorPopupClose != nil {
+		g.colorPopupClose()
+		g.colorPopupClose = nil
+		return
+	}
+
+	contents := widget.NewContainer(
+		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x2a, 0x2a, 0x32, 0xff})),
+		widget.ContainerOpts.Layout(widget.NewRowLayout(
+			widget.RowLayoutOpts.Direction(widget.DirectionVertical),
+			widget.RowLayoutOpts.Spacing(4),
+			widget.RowLayoutOpts.Padding(widget.NewInsetsSimple(6)),
+		)),
+	)
+
+	// closeFn is set after AddWindow returns; the entry handlers below
+	// capture this variable so they can close the popup on selection.
+	var closeFn widget.RemoveWindowFunc
+	for i, e := range colorEntries {
+		contents.AddChild(iconButton(colorSwatchIcon(e.c), func() {
+			g.colorIndex = i
+			g.imageWidget.BrushColor = e.c
+			g.imageWidget.Tool = ToolPencil
+			paintColorSwatch(g.colorSwatch, e.c)
+			if closeFn != nil {
+				closeFn()
+				g.colorPopupClose = nil
+			}
+		}))
+	}
+
+	window := widget.NewWindow(
+		widget.WindowOpts.Contents(contents),
+		widget.WindowOpts.CloseMode(widget.CLICK_OUT),
+		widget.WindowOpts.ClosedHandler(func(args *widget.WindowClosedEventArgs) {
+			g.colorPopupClose = nil
+		}),
+	)
+
+	const (
+		entryW = 36
+		entryH = 32
+		gapY   = 4
+		padXY  = 6
+	)
+	popupW := entryW + 2*padXY
+	popupH := len(colorEntries)*entryH + (len(colorEntries)-1)*gapY + 2*padXY
+	rect := g.colorBtn.GetWidget().Rect
+	px := rect.Min.X
+	py := rect.Max.Y + 2
+	window.SetLocation(stdimage.Rect(px, py, px+popupW, py+popupH))
+
+	closeFn = g.ui.AddWindow(window)
+	g.colorPopupClose = closeFn
 }
 
 // buildStyleCombo builds the image-style dropdown. Lives inside the
@@ -387,18 +555,72 @@ func (g *game) doSearch(q string) {
 	g.loadKnot(q)
 }
 
-// enterDrawingMode puts the UI into a nameless "Drawing" state: no
-// current knot, no image, no properties text, and the name label
-// shows "Drawing". The debug overlay is cleared as well.
+// enterDrawingMode puts the UI into a nameless "Drawing" state: blank
+// white canvas, no current knot, no properties text. The debug overlay
+// is cleared as well.
 func (g *game) enterDrawingMode() {
 	g.currentKnot = nil
-	g.currentRaster = nil
-	g.imageWidget.Image = nil
+	g.clearCanvas()
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 	g.input.SetText("")
 	g.nameLabel.Label = "Drawing"
 	g.propsArea.SetText("")
+}
+
+// initCanvas allocates a blank white canvas and installs it as the
+// drawable image. Called once after the UI tree is built, before the
+// first loadKnot.
+func (g *game) initCanvas() {
+	if g.imageWidget == nil {
+		return
+	}
+	canvas := ebiten.NewImage(windowWidth, windowWidth)
+	canvas.Fill(canvasBG)
+	g.imageWidget.Image = canvas
+}
+
+// clearCanvas fills the canvas with the white background color,
+// preserving its size and the Image reference so the scaledImage
+// widget keeps pointing at the same buffer.
+func (g *game) clearCanvas() {
+	if g.imageWidget == nil || g.imageWidget.Image == nil {
+		return
+	}
+	g.imageWidget.Image.Fill(canvasBG)
+}
+
+// blitKnotOnCanvas replaces the canvas contents with a white fill
+// followed by img scaled uniformly to fit centered. The canvas buffer
+// is reused so subsequent pencil/eraser strokes land on the same image
+// that scaledImage is rendering.
+func (g *game) blitKnotOnCanvas(img *ebiten.Image) {
+	if g.imageWidget == nil || g.imageWidget.Image == nil || img == nil {
+		return
+	}
+	canvas := g.imageWidget.Image
+	canvas.Fill(canvasBG)
+	cb := canvas.Bounds()
+	cw, ch := cb.Dx(), cb.Dy()
+	ib := img.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	if iw == 0 || ih == 0 {
+		return
+	}
+	sx := float64(cw) / float64(iw)
+	sy := float64(ch) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := (float64(cw) - dw) / 2
+	oy := (float64(ch) - dh) / 2
+	opts := &ebiten.DrawImageOptions{}
+	opts.GeoM.Scale(scale, scale)
+	opts.GeoM.Translate(ox, oy)
+	canvas.DrawImage(img, opts)
 }
 
 // loadKnot looks the name up, updates widgets.
@@ -416,34 +638,58 @@ func (g *game) loadKnot(name string) {
 	g.refreshProperties()
 }
 
-// refreshImage re-loads the current knot's image for the current style.
+// refreshImage re-loads the current knot's image for the current style
+// and blits it onto the canvas, replacing any prior drawing. Keeps the
+// same canvas buffer so the pencil/eraser stay wired up to the image
+// being displayed.
 func (g *game) refreshImage() {
 	if g.currentKnot == nil {
-		g.imageWidget.Image = nil
+		g.clearCanvas()
 		return
 	}
 	data, kind, err := g.currentKnot.LoadImage(g.currentStyle)
 	if err != nil {
 		log.Printf("load image: %v", err)
-		g.imageWidget.Image = nil
-		g.currentRaster = nil
+		g.clearCanvas()
 		return
 	}
-	img, raster, err := decodeKnotImage(data, kind)
+	img, _, err := decodeKnotImage(data, kind)
 	if err != nil {
 		log.Printf("decode image: %v", err)
-		g.imageWidget.Image = nil
-		g.currentRaster = nil
+		g.clearCanvas()
 		return
 	}
-	g.imageWidget.Image = img
-	g.currentRaster = raster
+	g.blitKnotOnCanvas(img)
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 }
 
-// doDebug toggles the diagram-overlay debug view. The first click runs
-// convertImage over the current raster and overlays a red circle at
+// canvasToImage snapshots the current canvas contents into an in-memory
+// *image.RGBA so it can be fed to the pure-Go convert pipeline. ebiten
+// images store premultiplied RGBA, which matches image.RGBA. Returns
+// nil if the canvas is missing.
+func (g *game) canvasToImage() *stdimage.RGBA {
+	if g.imageWidget == nil || g.imageWidget.Image == nil {
+		return nil
+	}
+	canvas := g.imageWidget.Image
+	b := canvas.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	pix := make([]byte, 4*w*h)
+	canvas.ReadPixels(pix)
+	return &stdimage.RGBA{
+		Pix:    pix,
+		Stride: 4 * w,
+		Rect:   stdimage.Rect(0, 0, w, h),
+	}
+}
+
+// doDebug toggles the diagram-overlay debug view. The first click
+// snapshots the current canvas (so any user pencil/eraser strokes are
+// included), runs the convert pipeline, and overlays a red circle at
 // each detected crossing plus a blue × at each arc's midpoint; the
 // second click clears the overlay.
 func (g *game) doDebug() {
@@ -455,11 +701,12 @@ func (g *game) doDebug() {
 		g.imageWidget.DebugArcs = nil
 		return
 	}
-	if g.currentRaster == nil {
-		g.propsArea.SetText(g.propsArea.GetText() + "debug: no image loaded\n")
+	raster := g.canvasToImage()
+	if raster == nil {
+		g.propsArea.SetText(g.propsArea.GetText() + "debug: no canvas\n")
 		return
 	}
-	d, err := convertImage(g.currentRaster)
+	d, err := convertImage(raster)
 	if err != nil {
 		g.propsArea.SetText(g.propsArea.GetText() + fmt.Sprintf("debug: convert failed: %v\n", err))
 		return
@@ -519,19 +766,20 @@ func arcMidpoint(poly []stdimage.Point) stdimage.Point {
 }
 
 // doConvert runs the knotfolio-style "Convert to diagram" pipeline
-// over the currently displayed raster and replaces the properties
-// area with a summary (crossing count, arc count, per-crossing and
-// per-arc details). The knot name is re-labelled "Drawing" since the
-// on-screen content is now the converted diagram rather than a named
-// KnotInfo row.
+// over a snapshot of the current canvas (so any user pencil/eraser
+// strokes are included) and replaces the properties area with a
+// summary (crossing count, arc count, per-crossing and per-arc
+// details). The knot name is re-labelled "Drawing" since the on-screen
+// content is now the converted diagram rather than a named KnotInfo
+// row.
 func (g *game) doConvert() {
-	if g.currentRaster == nil {
-		g.nameLabel.Label = "Drawing"
-		g.propsArea.SetText("convert: no image loaded\n")
+	raster := g.canvasToImage()
+	g.nameLabel.Label = "Drawing"
+	if raster == nil {
+		g.propsArea.SetText("convert: no canvas\n")
 		return
 	}
-	d, err := convertImage(g.currentRaster)
-	g.nameLabel.Label = "Drawing"
+	d, err := convertImage(raster)
 	if err != nil {
 		g.propsArea.SetText(fmt.Sprintf("convert failed: %v\n", err))
 		return

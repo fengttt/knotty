@@ -18,13 +18,32 @@ type debugArcMark struct {
 	Info string
 }
 
+// Drawing tools for scaledImage's pencil/eraser mode.
+const (
+	ToolPencil = 0
+	ToolEraser = 1
+)
+
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
 // uniformly scaled to fit inside its allocated Rect, preserving aspect
 // ratio and centered. When the Rect is wider than it is tall (or vice
 // versa), the image renders as a centered square-ish region with empty
 // space on the long axis.
+//
+// When DrawEnabled is true, left-mouse drags over the image paint onto
+// Image directly (pencil writes BrushColor, eraser writes white). Host
+// code owns Image; scaledImage never allocates it.
 type scaledImage struct {
 	Image *ebiten.Image
+
+	// Drawing mode. When DrawEnabled is true, mouse-drag paints on
+	// Image using Tool (ToolPencil / ToolEraser), BrushColor, and
+	// BrushSize. BrushSize is in source-image pixels; the eraser uses
+	// a wider brush than the pencil.
+	DrawEnabled bool
+	Tool        int
+	BrushColor  color.Color
+	BrushSize   float32
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -40,6 +59,11 @@ type scaledImage struct {
 	// DebugFace is the font face used to render crossing index labels.
 	// When nil, labels are skipped.
 	DebugFace etext.Face
+
+	// Drawing state: last cursor position (in source-image pixel coords)
+	// and whether we're mid-stroke.
+	lastDrawPoint image.Point
+	drawing       bool
 
 	widgetOpts []widget.WidgetOpt
 	init       *widget.MultiOnce
@@ -95,6 +119,91 @@ func (s *scaledImage) Validate() {}
 func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	s.init.Do()
 	s.widget.Update(updObj)
+	s.handleDrawing()
+}
+
+// handleDrawing translates the mouse state into strokes on Image. The
+// widget's allocated Rect typically over-covers the drawn image (due
+// to aspect-ratio letterboxing), so we convert the cursor's screen
+// coordinates to source-image pixel coordinates and only paint when
+// those land inside Image.Bounds().
+func (s *scaledImage) handleDrawing() {
+	if !s.DrawEnabled || s.Image == nil {
+		s.drawing = false
+		return
+	}
+	ib := s.Image.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
+	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
+		return
+	}
+	sx := float64(rw) / float64(iw)
+	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
+
+	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+	mx, my := ebiten.CursorPosition()
+	px := (float64(mx) - ox) / scale
+	py := (float64(my) - oy) / scale
+	inBounds := px >= 0 && py >= 0 && px < float64(iw) && py < float64(ih)
+
+	if pressed && inBounds {
+		cur := image.Point{X: int(px), Y: int(py)}
+		if s.drawing {
+			s.strokeLine(s.lastDrawPoint, cur)
+		} else {
+			s.strokeDot(cur)
+		}
+		s.lastDrawPoint = cur
+		s.drawing = true
+	} else {
+		s.drawing = false
+	}
+}
+
+func (s *scaledImage) strokeColor() color.Color {
+	if s.Tool == ToolEraser {
+		return color.NRGBA{0xff, 0xff, 0xff, 0xff}
+	}
+	if s.BrushColor == nil {
+		return color.NRGBA{0, 0, 0, 0xff}
+	}
+	return s.BrushColor
+}
+
+func (s *scaledImage) brushWidth() float32 {
+	w := s.BrushSize
+	if w <= 0 {
+		w = 3
+	}
+	if s.Tool == ToolEraser {
+		w *= 4
+	}
+	return w
+}
+
+// strokeLine paints a stroked segment from a to b plus a disk at each
+// endpoint, so consecutive segments join smoothly without visible gaps
+// and the caps look round rather than butted.
+func (s *scaledImage) strokeLine(a, b image.Point) {
+	w := s.brushWidth()
+	c := s.strokeColor()
+	vector.StrokeLine(s.Image, float32(a.X), float32(a.Y), float32(b.X), float32(b.Y), w, c, true)
+	r := w / 2
+	vector.FillCircle(s.Image, float32(a.X), float32(a.Y), r, c, true)
+	vector.FillCircle(s.Image, float32(b.X), float32(b.Y), r, c, true)
+}
+
+func (s *scaledImage) strokeDot(p image.Point) {
+	vector.FillCircle(s.Image, float32(p.X), float32(p.Y), s.brushWidth()/2, s.strokeColor(), true)
 }
 
 func (s *scaledImage) Render(screen *ebiten.Image) {
