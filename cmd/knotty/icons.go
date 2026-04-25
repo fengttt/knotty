@@ -22,7 +22,17 @@ const iconSize = 24
 //go:embed NotoSansSymbols2-Regular.ttf
 var notoSymbolsTTF []byte
 
-var symbolFace etext.Face
+// materialSymbolsTTF is a 3-glyph subset of Material Symbols Outlined
+// (Apache 2.0). It supplies U+E166 (undo), U+E65F (auto_awesome, used
+// for Beautify), and U+E6D0 (ink_eraser).
+//
+//go:embed MaterialSymbols-subset.ttf
+var materialSymbolsTTF []byte
+
+var (
+	symbolFace   etext.Face
+	materialFace etext.Face
+)
 
 func init() {
 	src, err := etext.NewGoTextFaceSource(bytes.NewReader(notoSymbolsTTF))
@@ -30,18 +40,29 @@ func init() {
 		log.Fatalf("load symbols font: %v", err)
 	}
 	symbolFace = &etext.GoTextFace{Source: src, Size: 20}
+
+	msrc, err := etext.NewGoTextFaceSource(bytes.NewReader(materialSymbolsTTF))
+	if err != nil {
+		log.Fatalf("load material symbols font: %v", err)
+	}
+	materialFace = &etext.GoTextFace{Source: msrc, Size: 20}
 }
 
-// glyphIcon renders a single rune from the embedded symbols font,
-// centered in a 24×24 image and tinted to the given color.
-func glyphIcon(glyph string, c color.Color) *ebiten.Image {
+// glyphIconFace renders a single rune from the given font face, centered
+// in a 24×24 image and tinted to the given color.
+func glyphIconFace(face etext.Face, glyph string, c color.Color) *ebiten.Image {
 	img := ebiten.NewImage(iconSize, iconSize)
-	w, h := etext.Measure(glyph, symbolFace, 0)
+	w, h := etext.Measure(glyph, face, 0)
 	opts := &etext.DrawOptions{}
 	opts.GeoM.Translate((float64(iconSize)-w)/2, (float64(iconSize)-h)/2)
 	opts.ColorScale.ScaleWithColor(c)
-	etext.Draw(img, glyph, symbolFace, opts)
+	etext.Draw(img, glyph, face, opts)
 	return img
+}
+
+// glyphIcon renders a Noto-symbols glyph; kept for the pencil icon.
+func glyphIcon(glyph string, c color.Color) *ebiten.Image {
+	return glyphIconFace(symbolFace, glyph, c)
 }
 
 // pencilIcon renders U+1F589 (LOWER LEFT PENCIL) in bright yellow.
@@ -49,9 +70,20 @@ func pencilIcon() *ebiten.Image {
 	return glyphIcon("\U0001F589", color.NRGBA{0xff, 0xee, 0x80, 0xff})
 }
 
-// eraserIcon renders U+232B (ERASE TO THE LEFT) in bright pink.
+// eraserIcon renders U+E6D0 (Material Symbols "ink_eraser") in bright pink.
 func eraserIcon() *ebiten.Image {
-	return glyphIcon("⌫", color.NRGBA{0xff, 0x90, 0xb0, 0xff})
+	return glyphIconFace(materialFace, "", color.NRGBA{0xff, 0x90, 0xb0, 0xff})
+}
+
+// beautifyIcon renders U+E65F (Material Symbols "auto_awesome") in
+// soft cyan as the Beautify trigger.
+func beautifyIcon() *ebiten.Image {
+	return glyphIconFace(materialFace, "", color.NRGBA{0x80, 0xe0, 0xff, 0xff})
+}
+
+// undoIcon renders U+E166 (Material Symbols "undo") in soft amber.
+func undoIcon() *ebiten.Image {
+	return glyphIconFace(materialFace, "", color.NRGBA{0xff, 0xc8, 0x70, 0xff})
 }
 
 // colorSwatchIcon draws a single filled circle in the given color with

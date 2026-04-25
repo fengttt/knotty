@@ -95,6 +95,11 @@ type game struct {
 	currentKnot  *knot.Diagram
 	currentStyle knot.ImageType
 
+	// undoSnap is a pixel-level snapshot of the canvas captured right
+	// before doBeautify overwrites it; doUndo blits it back. Allocated
+	// lazily and reused so we don't allocate a fresh Image per click.
+	undoSnap *ebiten.Image
+
 	face     etext.Face
 	hugeFace etext.Face
 }
@@ -227,6 +232,12 @@ func (g *game) buildDrawToolbar() *widget.Container {
 		)),
 	)
 
+	row.AddChild(iconButton(beautifyIcon(), func() {
+		g.doBeautify()
+	}))
+	row.AddChild(iconButton(undoIcon(), func() {
+		g.doUndo()
+	}))
 	row.AddChild(iconButton(pencilIcon(), func() {
 		g.imageWidget.Tool = ToolPencil
 	}))
@@ -815,6 +826,67 @@ func (g *game) doConvert() {
 			i, a.Start.Crossing, overLabel(a.Start.Over), a.End.Crossing, overLabel(a.End.Over), len(a.Polyline))
 	}
 	g.propsArea.SetText(b.String())
+}
+
+// doBeautify takes a snapshot of the current canvas, runs the convert
+// pipeline to recover a Diagram, runs the Tutte-embedding beautifier,
+// and rasterises the result back onto the canvas. The pre-beautify
+// pixels are saved into undoSnap so doUndo can restore them.
+func (g *game) doBeautify() {
+	raster := g.canvasToImage()
+	if raster == nil {
+		g.propsArea.SetText("beautify: no canvas\n")
+		return
+	}
+	d, err := convertImage(raster)
+	if err != nil {
+		g.propsArea.SetText(fmt.Sprintf("beautify: convert failed: %v\n", err))
+		return
+	}
+	canvas := g.imageWidget.Image
+	if canvas == nil {
+		g.propsArea.SetText("beautify: no canvas image\n")
+		return
+	}
+	g.snapshotCanvas()
+	cb := canvas.Bounds()
+	bd, err := d.Beautify(cb.Dx(), cb.Dy())
+	if err != nil {
+		g.propsArea.SetText(fmt.Sprintf("beautify: %v\n", err))
+		return
+	}
+	renderDiagram(canvas, bd, canvasBG)
+	g.imageWidget.DebugCrossings = nil
+	g.imageWidget.DebugArcs = nil
+	g.imageWidget.DebugJunctions = nil
+	g.nameLabel.Label = "Beautified"
+}
+
+// snapshotCanvas copies the current canvas pixels into undoSnap so a
+// subsequent doUndo can restore them. Allocates undoSnap on first call
+// (or when the canvas size has changed).
+func (g *game) snapshotCanvas() {
+	canvas := g.imageWidget.Image
+	if canvas == nil {
+		return
+	}
+	b := canvas.Bounds()
+	if g.undoSnap == nil || g.undoSnap.Bounds() != b {
+		g.undoSnap = ebiten.NewImage(b.Dx(), b.Dy())
+	}
+	g.undoSnap.Clear()
+	g.undoSnap.DrawImage(canvas, nil)
+}
+
+// doUndo restores the most recent pre-beautify canvas snapshot. No-op if
+// no snapshot has been taken yet in this session.
+func (g *game) doUndo() {
+	if g.undoSnap == nil || g.imageWidget == nil || g.imageWidget.Image == nil {
+		return
+	}
+	canvas := g.imageWidget.Image
+	canvas.Clear()
+	canvas.DrawImage(g.undoSnap, nil)
 }
 
 // refreshProperties renders every Diagram property (except name, shown
