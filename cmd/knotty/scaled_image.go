@@ -56,6 +56,12 @@ type scaledImage struct {
 	// hover (typically the arc endpoints and over/under flags).
 	DebugArcs []debugArcMark
 
+	// DebugJunctions are pixels in the thinned skeleton with more than
+	// two same-color neighbors — places where the convert pipeline
+	// couldn't separate over from under. Rendered as orange circles so
+	// they're distinguishable from resolved crossings.
+	DebugJunctions []image.Point
+
 	// DebugFace is the font face used to render crossing index labels.
 	// When nil, labels are skipped.
 	DebugFace etext.Face
@@ -236,7 +242,7 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	opts.GeoM.Translate(ox, oy)
 	screen.DrawImage(s.Image, &opts)
 
-	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 {
+	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 && len(s.DebugJunctions) == 0 {
 		return
 	}
 	r := float32(8)
@@ -245,6 +251,7 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	}
 	clrCross := color.NRGBA{0xff, 0x40, 0x40, 0xff}
 	clrArc := color.NRGBA{0x40, 0xc0, 0xff, 0xff}
+	clrJunc := color.NRGBA{0xff, 0xa0, 0x20, 0xff}
 	mx, my := ebiten.CursorPosition()
 
 	// Arc × mark is half the circle radius; hover hit-box matches.
@@ -272,6 +279,15 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 			hoverText = m.Info
 			hoverD2 = d2
 		}
+	}
+	// Junctions are skeleton pixels the convert pipeline couldn't
+	// resolve. Drawn slightly smaller than crossings so they read as
+	// "trouble spot" rather than "valid crossing".
+	jr := r * 0.7
+	for _, p := range s.DebugJunctions {
+		cx := float32(ox) + float32(p.X)*float32(scale)
+		cy := float32(oy) + float32(p.Y)*float32(scale)
+		vector.StrokeCircle(screen, cx, cy, jr, 2, clrJunc, true)
 	}
 	if hoverText != "" && s.DebugFace != nil {
 		s.drawTooltip(screen, hoverText, mx, my)

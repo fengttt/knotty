@@ -245,20 +245,20 @@ func (p *pixbuf) deleteSpurs() {
 	}
 }
 
-// junctionCount returns the number of pixels with more than 2 same-color
+// junctions returns the pixel locations with more than 2 same-color
 // neighbors — these mean understrand fused to overstrand (user error in
 // knotfolio's world; for rendered diagrams it usually means the skeleton
 // couldn't cleanly resolve a small crossing).
-func (p *pixbuf) junctionCount() int {
-	n := 0
+func (p *pixbuf) junctions() []image.Point {
+	var pts []image.Point
 	for y := 1; y < p.h-1; y++ {
 		for x := 1; x < p.w-1; x++ {
 			if p.buf[y*p.w+x] > 0 && p.sameNeighbors(x, y) > 2 {
-				n++
+				pts = append(pts, image.Point{X: x, Y: y})
 			}
 		}
 	}
-	return n
+	return pts
 }
 
 // thicken expands every ink region by 1 pixel in its 8-neighborhood. Port
@@ -641,6 +641,18 @@ func findVertID(verts []fPoint, v fPoint) int {
 	return -1
 }
 
+// FusedJunctionsError reports that the thinned skeleton contains pixels
+// with more than two same-color neighbors — the convert pipeline cannot
+// resolve over/under at those locations. Junctions holds the pixel
+// coordinates so the caller can render them for debugging.
+type FusedJunctionsError struct {
+	Junctions []image.Point
+}
+
+func (e *FusedJunctionsError) Error() string {
+	return fmt.Sprintf("%d fused junctions in skeleton — cannot interpret", len(e.Junctions))
+}
+
 // convertImage runs the full knotfolio-style pipeline on img and returns
 // a polyline-level Diagram. The algorithm expects a clean knot diagram
 // with visual gaps at under-crossings (KnotInfo Diagram / Snappy styles
@@ -652,8 +664,8 @@ func convertImage(img image.Image) (*Diagram, error) {
 	p := binaryFromImage(img)
 	p.thin()
 	p.deleteSpurs()
-	if jc := p.junctionCount(); jc > 0 {
-		return nil, fmt.Errorf("%d fused junctions in skeleton — cannot interpret", jc)
+	if js := p.junctions(); len(js) > 0 {
+		return nil, &FusedJunctionsError{Junctions: js}
 	}
 
 	thick := p.clone()

@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	stdimage "image"
 	"image/color"
@@ -563,6 +564,7 @@ func (g *game) enterDrawingMode() {
 	g.clearCanvas()
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
+	g.imageWidget.DebugJunctions = nil
 	g.input.SetText("")
 	g.nameLabel.Label = "Drawing"
 	g.propsArea.SetText("")
@@ -662,6 +664,7 @@ func (g *game) refreshImage() {
 	g.blitKnotOnCanvas(img)
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
+	g.imageWidget.DebugJunctions = nil
 }
 
 // canvasToImage snapshots the current canvas contents into an in-memory
@@ -690,15 +693,18 @@ func (g *game) canvasToImage() *stdimage.RGBA {
 // doDebug toggles the diagram-overlay debug view. The first click
 // snapshots the current canvas (so any user pencil/eraser strokes are
 // included), runs the convert pipeline, and overlays a red circle at
-// each detected crossing plus a blue × at each arc's midpoint; the
-// second click clears the overlay.
+// each detected crossing plus a blue × at each arc's midpoint. If
+// convert fails because the skeleton has fused junctions, those
+// junction pixels are overlaid as orange circles instead. A second
+// click clears whichever overlay is showing.
 func (g *game) doDebug() {
 	if g.imageWidget == nil {
 		return
 	}
-	if len(g.imageWidget.DebugCrossings) > 0 || len(g.imageWidget.DebugArcs) > 0 {
+	if len(g.imageWidget.DebugCrossings) > 0 || len(g.imageWidget.DebugArcs) > 0 || len(g.imageWidget.DebugJunctions) > 0 {
 		g.imageWidget.DebugCrossings = nil
 		g.imageWidget.DebugArcs = nil
+		g.imageWidget.DebugJunctions = nil
 		return
 	}
 	raster := g.canvasToImage()
@@ -708,6 +714,11 @@ func (g *game) doDebug() {
 	}
 	d, err := convertImage(raster)
 	if err != nil {
+		var fje *FusedJunctionsError
+		if errors.As(err, &fje) {
+			g.imageWidget.DebugJunctions = append([]stdimage.Point(nil), fje.Junctions...)
+			return
+		}
 		g.propsArea.SetText(g.propsArea.GetText() + fmt.Sprintf("debug: convert failed: %v\n", err))
 		return
 	}
