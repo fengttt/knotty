@@ -100,6 +100,11 @@ type game struct {
 	// lazily and reused so we don't allocate a fresh Image per click.
 	undoSnap *ebiten.Image
 
+	// diag is the always-on input-diagnostic overlay (see diag.go).
+	// Useful for debugging touch on iOS where the OS may swallow the
+	// gesture before Ebiten sees it.
+	diag inputDiag
+
 	face     etext.Face
 	hugeFace etext.Face
 }
@@ -153,12 +158,14 @@ func (g *game) Layout(outW, outH int) (int, int) {
 
 func (g *game) Update() error {
 	g.ui.Update()
+	g.diag.update()
 	return nil
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.NRGBA{0x1a, 0x1a, 0x1a, 0xff})
 	g.ui.Draw(screen)
+	g.diag.draw(screen, g.face)
 }
 
 // buildUI constructs the full UI tree.
