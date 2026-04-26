@@ -200,6 +200,188 @@ func TestCrossingDragNeverChangesCrossingCount(t *testing.T) {
 	}
 }
 
+// TestArcDragGuardRejectsNewCrossings is the strong invariant test for
+// the user-stated rule "dragging should not create new crossing points
+// or remove existing crossing points". It builds a 2-arc diagram
+// where both arcs share two endpoints (a Hopf-link-style geometry),
+// then sweeps a drag of the lower arc upward through and past the
+// upper arc. countDiagramCrossings must stay at 0 throughout — every
+// frame whose raw motion would cross the other arc must be rolled
+// back by the snap-back guard.
+func TestArcDragGuardRejectsNewCrossings(t *testing.T) {
+	d := &Diagram{
+		Crossings: []image.Point{{X: 0, Y: 0}, {X: 100, Y: 0}},
+		Arcs: []Arc{
+			// Lower arc, bowed down to y = -50 at the midpoint.
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: -30}, {X: 50, Y: -50},
+					{X: 75, Y: -30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+			// Upper arc, bowed up to y = +50 at the midpoint.
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: 30}, {X: 50, Y: 50},
+					{X: 75, Y: 30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+		},
+	}
+	if got := countDiagramCrossings(d); got != 0 {
+		t.Fatalf("baseline diagram: got %d crossings want 0", got)
+	}
+
+	startPolyA := append([]image.Point(nil), d.Arcs[0].Polyline...)
+	startPolyB := append([]image.Point(nil), d.Arcs[1].Polyline...)
+	endA := startPolyA[len(startPolyA)-1]
+	startA := startPolyA[0]
+
+	st := &dragState{kind: dragArc, index: 0}
+	st.beginDrag(d, imagePointF{X: 50, Y: -50})
+	st.dragging = true
+
+	// Sweep the cursor straight up, well past the upper arc. Without
+	// the guard, the lower arc would pass through the upper arc and
+	// raise the crossing count to a positive value.
+	for y := -50.0; y <= 150.0; y += 1.0 {
+		st.applyDrag(d, imagePointF{X: 50, Y: y})
+		if got := countDiagramCrossings(d); got != 0 {
+			t.Fatalf("at cursor y=%v: countDiagramCrossings=%d want 0", y, got)
+		}
+	}
+
+	// Endpoints of the dragged arc must still be pinned to the
+	// crossings they belong to.
+	if d.Arcs[0].Polyline[0] != startA {
+		t.Errorf("arc 0 start moved: got %v want %v", d.Arcs[0].Polyline[0], startA)
+	}
+	last := len(d.Arcs[0].Polyline) - 1
+	if d.Arcs[0].Polyline[last] != endA {
+		t.Errorf("arc 0 end moved: got %v want %v", d.Arcs[0].Polyline[last], endA)
+	}
+	// The other arc must not have moved at all (only the grabbed
+	// arc's interior is touched).
+	for i, p := range d.Arcs[1].Polyline {
+		if p != startPolyB[i] {
+			t.Errorf("arc 1 point %d moved: got %v want %v", i, p, startPolyB[i])
+		}
+	}
+}
+
+// TestCrossingDragGuardRejectsNewCrossings exercises the guard for
+// crossing drags. Two arcs run between two crossings; dragging the
+// left crossing far to the right would smear the lower arc up
+// through the upper arc. The guard must keep the spurious-crossing
+// count at zero.
+func TestCrossingDragGuardRejectsNewCrossings(t *testing.T) {
+	d := &Diagram{
+		Crossings: []image.Point{{X: 0, Y: 0}, {X: 100, Y: 0}},
+		Arcs: []Arc{
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: -30}, {X: 50, Y: -50},
+					{X: 75, Y: -30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: 30}, {X: 50, Y: 50},
+					{X: 75, Y: 30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+		},
+	}
+	if got := countDiagramCrossings(d); got != 0 {
+		t.Fatalf("baseline diagram: got %d crossings want 0", got)
+	}
+
+	st := &dragState{kind: dragCrossing, index: 0, dragging: true}
+	for y := 0.0; y <= 120.0; y += 1.0 {
+		st.applyDrag(d, imagePointF{X: 0, Y: y})
+		if got := countDiagramCrossings(d); got != 0 {
+			t.Fatalf("at crossing-cursor y=%v: countDiagramCrossings=%d want 0", y, got)
+		}
+	}
+}
+
+// TestArcDragRawWithoutGuardWouldCreateCrossings confirms the test
+// scenario in TestArcDragGuardRejectsNewCrossings is not vacuous: the
+// raw deformation (without the snap-back guard) DOES introduce
+// spurious crossings on the same input. If this test ever stops
+// observing any spurious crossings, the guard test above is no longer
+// proving anything.
+func TestArcDragRawWithoutGuardWouldCreateCrossings(t *testing.T) {
+	d := &Diagram{
+		Crossings: []image.Point{{X: 0, Y: 0}, {X: 100, Y: 0}},
+		Arcs: []Arc{
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: -30}, {X: 50, Y: -50},
+					{X: 75, Y: -30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+			{
+				Polyline: []image.Point{
+					{X: 0, Y: 0}, {X: 25, Y: 30}, {X: 50, Y: 50},
+					{X: 75, Y: 30}, {X: 100, Y: 0},
+				},
+				Start: Endpoint{Crossing: 0},
+				End:   Endpoint{Crossing: 1},
+			},
+		},
+	}
+	st := &dragState{kind: dragArc, index: 0}
+	st.beginDrag(d, imagePointF{X: 50, Y: -50})
+	st.dragging = true
+
+	maxSeen := 0
+	for y := -50.0; y <= 150.0; y += 1.0 {
+		st.applyDragRaw(d, imagePointF{X: 50, Y: y})
+		if c := countDiagramCrossings(d); c > maxSeen {
+			maxSeen = c
+		}
+	}
+	if maxSeen == 0 {
+		t.Fatal("applyDragRaw never produced a spurious crossing — " +
+			"TestArcDragGuardRejectsNewCrossings can't be proving anything")
+	}
+}
+
+// TestProperSegmentIntersectionShared verifies the geometry helper
+// rejects shared-endpoint touches (which the drag guard relies on,
+// since polylines that meet at a registered crossing legitimately
+// share an endpoint).
+func TestProperSegmentIntersectionShared(t *testing.T) {
+	a := image.Point{X: 0, Y: 0}
+	b := image.Point{X: 100, Y: 0}
+	c := image.Point{X: 0, Y: 0}
+	d := image.Point{X: 50, Y: 50}
+	if properSegmentIntersection(a, b, c, d, 1e-6) {
+		t.Error("shared endpoint at A=C should not be a proper intersection")
+	}
+}
+
+func TestProperSegmentIntersectionCrossing(t *testing.T) {
+	a := image.Point{X: 0, Y: 0}
+	b := image.Point{X: 100, Y: 0}
+	c := image.Point{X: 50, Y: -50}
+	d := image.Point{X: 50, Y: 50}
+	if !properSegmentIntersection(a, b, c, d, 1e-6) {
+		t.Error("transversal crossing at midpoint should be a proper intersection")
+	}
+}
+
 // TestNearestOnPolylineMidpoint sanity-checks the geometry helper used
 // to pick which arc a hover/drag belongs to.
 func TestNearestOnPolylineMidpoint(t *testing.T) {

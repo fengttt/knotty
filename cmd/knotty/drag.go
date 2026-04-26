@@ -210,7 +210,33 @@ func (s *dragState) beginDrag(d *Diagram, cursor imagePointF) {
 
 // applyDrag mutates d to reflect a cursor-driven drag for one frame.
 // Returns true if anything changed.
+//
+// A drag step is committed only if it does not increase the number of
+// strict-interior segment-segment intersections in the diagram —
+// i.e. it does not introduce a new geometric crossing. Steps that
+// would create a new crossing are silently rejected: the polylines
+// (and crossing position, for crossing-drags) are restored to their
+// pre-step values. This enforces the "dragging should not create new
+// crossing points or remove existing crossing points" rule by making
+// the bad sub-step a no-op; the user's cursor keeps moving and a
+// later sub-step in a different direction will succeed.
 func (s *dragState) applyDrag(d *Diagram, cursor imagePointF) bool {
+	snap := snapshotForDrag(d, s)
+	beforeCount := countDiagramCrossings(d)
+	mutated := s.applyDragRaw(d, cursor)
+	if !mutated {
+		return false
+	}
+	if countDiagramCrossings(d) > beforeCount {
+		restoreSnapshot(d, snap)
+		return false
+	}
+	return true
+}
+
+// applyDragRaw is applyDrag without the snap-back guard. Tests use it
+// to verify the un-guarded math directly; applyDrag wraps it.
+func (s *dragState) applyDragRaw(d *Diagram, cursor imagePointF) bool {
 	switch s.kind {
 	case dragCrossing:
 		if s.index < 0 || s.index >= len(d.Crossings) {
@@ -280,6 +306,82 @@ func (s *dragState) applyDrag(d *Diagram, cursor imagePointF) bool {
 		return moved
 	}
 	return false
+}
+
+// dragSnapshot remembers exactly what a single applyDragRaw call may
+// touch, so a guard that detects a bad step can restore the prior
+// state. The set of fields captured depends on the drag kind:
+//
+//   - dragCrossing: the moving crossing's position plus the polylines
+//     of every arc incident to it (because crossing-drag rewrites
+//     those endpoints with falloff).
+//   - dragArc: just the polyline of the grabbed arc.
+type dragSnapshot struct {
+	kind         dragKind
+	crossingIdx  int
+	crossingPt   image.Point
+	arcSnapshots []arcPolylineSnapshot
+}
+
+type arcPolylineSnapshot struct {
+	idx  int
+	poly []image.Point
+}
+
+func snapshotForDrag(d *Diagram, s *dragState) dragSnapshot {
+	snap := dragSnapshot{kind: s.kind}
+	if d == nil {
+		return snap
+	}
+	switch s.kind {
+	case dragCrossing:
+		if s.index < 0 || s.index >= len(d.Crossings) {
+			return snap
+		}
+		snap.crossingIdx = s.index
+		snap.crossingPt = d.Crossings[s.index]
+		for i := range d.Arcs {
+			a := &d.Arcs[i]
+			if a.Start.Crossing == s.index || a.End.Crossing == s.index {
+				snap.arcSnapshots = append(snap.arcSnapshots, arcPolylineSnapshot{
+					idx:  i,
+					poly: append([]image.Point(nil), a.Polyline...),
+				})
+			}
+		}
+	case dragArc:
+		if s.index < 0 || s.index >= len(d.Arcs) {
+			return snap
+		}
+		snap.arcSnapshots = append(snap.arcSnapshots, arcPolylineSnapshot{
+			idx:  s.index,
+			poly: append([]image.Point(nil), d.Arcs[s.index].Polyline...),
+		})
+	}
+	return snap
+}
+
+func restoreSnapshot(d *Diagram, snap dragSnapshot) {
+	if d == nil {
+		return
+	}
+	if snap.kind == dragCrossing && snap.crossingIdx >= 0 && snap.crossingIdx < len(d.Crossings) {
+		d.Crossings[snap.crossingIdx] = snap.crossingPt
+	}
+	for _, as := range snap.arcSnapshots {
+		if as.idx < 0 || as.idx >= len(d.Arcs) {
+			continue
+		}
+		// Restore in place so the slice header callers may hold onto
+		// remains valid. The polyline may have been the same length
+		// throughout (drag never resizes it), so a copy suffices.
+		dst := d.Arcs[as.idx].Polyline
+		if len(dst) != len(as.poly) {
+			d.Arcs[as.idx].Polyline = append(dst[:0], as.poly...)
+		} else {
+			copy(dst, as.poly)
+		}
+	}
 }
 
 // translateArcEnd shifts the points of poly by (dx,dy) with a triangular
