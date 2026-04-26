@@ -22,6 +22,11 @@ type debugArcMark struct {
 const (
 	ToolPencil = 0
 	ToolEraser = 1
+	// ToolMove disables pencil/eraser drawing and routes the press
+	// into the drag state machine instead. A press over a crossing
+	// or arc grabs it immediately and continuous press-motion drags
+	// it. A press over empty space is a no-op.
+	ToolMove = 2
 )
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
@@ -30,16 +35,16 @@ const (
 // versa), the image renders as a centered square-ish region with empty
 // space on the long axis.
 //
-// When DrawEnabled is true, left-mouse drags over the image paint onto
-// Image directly (pencil writes BrushColor, eraser writes white). Host
-// code owns Image; scaledImage never allocates it.
+// When DrawEnabled is true and Tool is ToolPencil or ToolEraser,
+// left-mouse / touch drags over the image paint onto Image directly
+// (pencil writes BrushColor, eraser writes white). Host code owns
+// Image; scaledImage never allocates it.
 //
-// When Diagram is non-nil, the widget additionally supports
-// press-and-hold drag of crossings and arcs (see drag.go). Drag-mode
-// claims the cursor only after grabHoldDuration of stationary press
-// over a hit-target, so casual pencil strokes are unaffected. After a
-// drag ends, OnDiagramChanged is invoked so the host can re-render the
-// canvas from the new Diagram.
+// When Tool is ToolMove and Diagram is non-nil, the widget instead
+// routes presses into the drag state machine (see drag.go): press
+// over a crossing or arc grabs it, continuous press-motion drags it,
+// release ends the drag. After every diagram-mutating frame
+// OnDiagramChanged is invoked so the host can re-render the canvas.
 type scaledImage struct {
 	Image *ebiten.Image
 
@@ -162,35 +167,36 @@ func primaryPointer() (x, y float64, pressed, fromTouch bool) {
 func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	s.init.Do()
 	s.widget.Update(updObj)
-	// Drag has priority: if a Diagram is attached, the press-and-hold
-	// state machine inspects the cursor first and may swallow the
-	// stroke. handleDrawing is skipped when drag has armed the timer or
-	// committed to a drag, so pencil strokes only happen when the cursor
-	// is moving freely (no grab target nearby) or there's no diagram.
-	consumed := s.handleDragging()
-	if !consumed {
-		s.handleDrawing()
-	} else {
+	// Tool selects which input handler runs. ToolMove routes the
+	// press into the drag state machine; Pencil/Eraser route into
+	// handleDrawing. The two are mutually exclusive — switching tools
+	// resets stale state on whichever side just lost the input.
+	if s.Tool == ToolMove {
 		s.drawing = false
+		s.handleDragging()
+	} else {
+		s.drag.reset()
+		s.handleDrawing()
 	}
 }
 
-// handleDragging routes cursor input into the drag state machine when a
-// Diagram is attached. Returns true if the press should be considered
-// consumed by drag (so pencil/eraser doesn't also act on it this frame).
-func (s *scaledImage) handleDragging() bool {
+// handleDragging routes pointer input into the drag state machine.
+// Only called when Tool == ToolMove, so it doesn't need to coexist
+// with the drawing path. A nil Diagram is benign — refreshHover is
+// a no-op and presses over empty space don't grab anything.
+func (s *scaledImage) handleDragging() {
 	if s.Diagram == nil {
 		s.drag.reset()
-		return false
+		return
 	}
 	if s.Image == nil {
-		return false
+		return
 	}
 	ib := s.Image.Bounds()
 	iw, ih := ib.Dx(), ib.Dy()
 	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
 	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
-		return false
+		return
 	}
 	sx := float64(rw) / float64(iw)
 	sy := float64(rh) / float64(ih)
@@ -214,11 +220,6 @@ func (s *scaledImage) handleDragging() bool {
 	if mutated && s.OnDiagramChanged != nil {
 		s.OnDiagramChanged()
 	}
-	// Consume the press whenever the drag system is actively interested
-	// in it: while the hold-timer is armed, while dragging, and when the
-	// cursor is hovering a grabbable target without yet pressing (so the
-	// hover ring is visible without pencil ink under it).
-	return s.drag.pressing || s.drag.dragging
 }
 
 // handleDrawing translates the mouse state into strokes on Image. The

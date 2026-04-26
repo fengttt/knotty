@@ -86,6 +86,45 @@ func undoIcon() *ebiten.Image {
 	return glyphIconFace(materialFace, "", color.NRGBA{0xff, 0xc8, 0x70, 0xff})
 }
 
+// moveIcon draws a four-headed arrow (the standard "move" cursor
+// glyph) inside a 24×24 image. Drawn programmatically because it
+// isn't covered by either bundled symbol font subset and we don't
+// want to bring in another TTF for one glyph.
+func moveIcon() *ebiten.Image {
+	img := ebiten.NewImage(iconSize, iconSize)
+	c := color.NRGBA{0xb0, 0xe0, 0xff, 0xff}
+	const (
+		cx, cy   = float32(iconSize) / 2, float32(iconSize) / 2
+		armR     = float32(9)
+		headSize = float32(3)
+		stroke   = float32(1.5)
+	)
+	// Vertical and horizontal shafts intersecting at center.
+	vector.StrokeLine(img, cx, cy-armR, cx, cy+armR, stroke, c, true)
+	vector.StrokeLine(img, cx-armR, cy, cx+armR, cy, stroke, c, true)
+
+	// Arrowhead at each tip: two short legs aimed back toward the
+	// center, forming a small "V" that opens away from the tip.
+	heads := []struct {
+		tipX, tipY                 float32
+		leg1X, leg1Y, leg2X, leg2Y float32
+	}{
+		// Up tip — legs splay down-left and down-right.
+		{cx, cy - armR, cx - headSize, cy - armR + headSize, cx + headSize, cy - armR + headSize},
+		// Down tip — legs splay up-left and up-right.
+		{cx, cy + armR, cx - headSize, cy + armR - headSize, cx + headSize, cy + armR - headSize},
+		// Left tip — legs splay right-up and right-down.
+		{cx - armR, cy, cx - armR + headSize, cy - headSize, cx - armR + headSize, cy + headSize},
+		// Right tip — legs splay left-up and left-down.
+		{cx + armR, cy, cx + armR - headSize, cy - headSize, cx + armR - headSize, cy + headSize},
+	}
+	for _, h := range heads {
+		vector.StrokeLine(img, h.tipX, h.tipY, h.leg1X, h.leg1Y, stroke, c, true)
+		vector.StrokeLine(img, h.tipX, h.tipY, h.leg2X, h.leg2Y, stroke, c, true)
+	}
+	return img
+}
+
 // colorSwatchIcon draws a single filled circle in the given color with
 // a thin dark border so light colors (yellow) stay visible against the
 // button background.
