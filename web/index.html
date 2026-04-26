@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <title>Knotty</title>
+  <!-- viewport-fit=cover and user-scalable=no keep iOS Safari from
+       double-tap-zooming the canvas or shrinking it under the notch. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <style>
     html, body {
       margin: 0;
@@ -11,6 +14,37 @@
       background: #1a1a1a;
       color: #eee;
       font-family: system-ui, sans-serif;
+      /* iOS: don't bounce-scroll the page when the canvas is touched. */
+      overscroll-behavior: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    /*
+     * Critical for the long-press drag on iOS:
+     *
+     *   touch-action: none           — tell Safari the page handles touch,
+     *                                  don't pan/zoom or send synthetic
+     *                                  scroll gestures.
+     *   -webkit-touch-callout: none  — kill the long-press "Save Image /
+     *                                  Copy" callout that otherwise fires
+     *                                  at ~500ms and hijacks the touch
+     *                                  sequence before our 1-second hold
+     *                                  timer fires.
+     *   user-select / tap-highlight  — kill text-selection magnifier and
+     *                                  the gray tap flash on touched
+     *                                  elements.
+     *
+     * Without these, the Go side correctly sees the touchstart but
+     * never sees the continued touchmove / touchend, so the drag
+     * silently never arms.
+     */
+    canvas {
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
     }
     #loading {
       position: fixed;
@@ -34,6 +68,19 @@
   </div>
   <script src="wasm_exec.js"></script>
   <script>
+    // Belt-and-braces: capture-phase preventDefault on touch events so
+    // iOS Safari never gets a chance to start its own long-press
+    // gesture even if the canvas-level CSS is overridden somewhere.
+    // passive:false is required for preventDefault to take effect on
+    // touchstart/touchmove in modern browsers.
+    for (const ev of ["touchstart", "touchmove", "touchend", "gesturestart"]) {
+      document.addEventListener(ev, (e) => {
+        if (e.target && e.target.tagName === "CANVAS") {
+          e.preventDefault();
+        }
+      }, { passive: false, capture: true });
+    }
+
     (async () => {
       const go = new Go();
       const resp = await fetch("knotty.wasm");
