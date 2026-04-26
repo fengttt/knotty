@@ -217,6 +217,15 @@ func (g *game) buildTopPane() *widget.Container {
 	g.imageWidget.Tool = ToolPencil
 	g.imageWidget.BrushColor = colorEntries[0].c
 	g.imageWidget.BrushSize = 3
+	// When a drag mutates the diagram, re-render it onto the canvas so
+	// the user sees the change. Keep this cheap — it runs every frame
+	// during a drag.
+	g.imageWidget.OnDiagramChanged = func() {
+		if g.imageWidget == nil || g.imageWidget.Image == nil || g.imageWidget.Diagram == nil {
+			return
+		}
+		renderDiagram(g.imageWidget.Image, g.imageWidget.Diagram, canvasBG)
+	}
 	top.AddChild(g.imageWidget)
 	return top
 }
@@ -573,6 +582,7 @@ func (g *game) doSearch(q string) {
 func (g *game) enterDrawingMode() {
 	g.currentKnot = nil
 	g.clearCanvas()
+	g.imageWidget.Diagram = nil
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 	g.imageWidget.DebugJunctions = nil
@@ -673,6 +683,9 @@ func (g *game) refreshImage() {
 		return
 	}
 	g.blitKnotOnCanvas(img)
+	// Loading a fresh raster discards any previous draggable diagram —
+	// its crossing/arc coordinates referred to the old canvas content.
+	g.imageWidget.Diagram = nil
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 	g.imageWidget.DebugJunctions = nil
@@ -856,6 +869,10 @@ func (g *game) doBeautify() {
 		return
 	}
 	renderDiagram(canvas, bd, canvasBG)
+	// Hand the freshly-laid-out diagram to the canvas widget so the
+	// user can grab/drag crossings and arcs. Drag mutations re-render
+	// the canvas via OnDiagramChanged.
+	g.imageWidget.Diagram = bd
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 	g.imageWidget.DebugJunctions = nil

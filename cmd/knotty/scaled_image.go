@@ -33,6 +33,13 @@ const (
 // When DrawEnabled is true, left-mouse drags over the image paint onto
 // Image directly (pencil writes BrushColor, eraser writes white). Host
 // code owns Image; scaledImage never allocates it.
+//
+// When Diagram is non-nil, the widget additionally supports
+// press-and-hold drag of crossings and arcs (see drag.go). Drag-mode
+// claims the cursor only after grabHoldDuration of stationary press
+// over a hit-target, so casual pencil strokes are unaffected. After a
+// drag ends, OnDiagramChanged is invoked so the host can re-render the
+// canvas from the new Diagram.
 type scaledImage struct {
 	Image *ebiten.Image
 
@@ -44,6 +51,19 @@ type scaledImage struct {
 	Tool        int
 	BrushColor  color.Color
 	BrushSize   float32
+
+	// Diagram, when non-nil, enables interactive drag of crossings and
+	// arcs. The host owns the diagram value; scaledImage mutates the
+	// underlying Crossings / Arc.Polyline slices in place. Set to nil
+	// to disable drag.
+	Diagram *Diagram
+
+	// OnDiagramChanged is called after a drag mutation so the host can
+	// re-render the canvas from the (mutated) diagram. Called per frame
+	// while dragging — keep it cheap.
+	OnDiagramChanged func()
+
+	drag dragState
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -125,7 +145,64 @@ func (s *scaledImage) Validate() {}
 func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	s.init.Do()
 	s.widget.Update(updObj)
-	s.handleDrawing()
+	// Drag has priority: if a Diagram is attached, the press-and-hold
+	// state machine inspects the cursor first and may swallow the
+	// stroke. handleDrawing is skipped when drag has armed the timer or
+	// committed to a drag, so pencil strokes only happen when the cursor
+	// is moving freely (no grab target nearby) or there's no diagram.
+	consumed := s.handleDragging()
+	if !consumed {
+		s.handleDrawing()
+	} else {
+		s.drawing = false
+	}
+}
+
+// handleDragging routes cursor input into the drag state machine when a
+// Diagram is attached. Returns true if the press should be considered
+// consumed by drag (so pencil/eraser doesn't also act on it this frame).
+func (s *scaledImage) handleDragging() bool {
+	if s.Diagram == nil {
+		s.drag.reset()
+		return false
+	}
+	if s.Image == nil {
+		return false
+	}
+	ib := s.Image.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
+	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
+		return false
+	}
+	sx := float64(rw) / float64(iw)
+	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
+
+	mx, my := ebiten.CursorPosition()
+	cursor := imagePointF{
+		X: (float64(mx) - ox) / scale,
+		Y: (float64(my) - oy) / scale,
+	}
+	inBounds := cursor.X >= 0 && cursor.Y >= 0 && cursor.X < float64(iw) && cursor.Y < float64(ih)
+
+	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+	mutated := s.drag.update(s.Diagram, cursor, inBounds, pressed)
+	if mutated && s.OnDiagramChanged != nil {
+		s.OnDiagramChanged()
+	}
+	// Consume the press whenever the drag system is actively interested
+	// in it: while the hold-timer is armed, while dragging, and when the
+	// cursor is hovering a grabbable target without yet pressing (so the
+	// hover ring is visible without pencil ink under it).
+	return s.drag.pressing || s.drag.dragging
 }
 
 // handleDrawing translates the mouse state into strokes on Image. The
@@ -241,6 +318,10 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	opts.GeoM.Scale(scale, scale)
 	opts.GeoM.Translate(ox, oy)
 	screen.DrawImage(s.Image, &opts)
+
+	// Drag hover/grab overlay sits above the canvas and below the debug
+	// markers so the debug overlay (when enabled) is never occluded.
+	drawDragOverlay(screen, ox, oy, scale, s.Diagram, &s.drag)
 
 	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 && len(s.DebugJunctions) == 0 {
 		return
