@@ -15,10 +15,11 @@ import (
 // When a Diagram is attached to scaledImage, the user may grab and drag
 // individual crossings or interior arc points. The interaction is
 // "press-and-hold to grab" so casual pencil/eraser strokes are not
-// hijacked: pressing the left mouse button while the cursor sits within
-// grab range of a crossing or arc starts a hold timer; if the button is
-// still held grabHoldDuration later AND the cursor has not moved more
-// than grabSlackPx, the closer of {crossing, arc} is grabbed and the
+// hijacked: pressing the left mouse button (or laying a finger on
+// the canvas) while the cursor sits within grab range of a crossing
+// or arc starts a hold timer; if the press is still held
+// grabHoldDuration later AND the cursor has not moved more than the
+// slack radius, the closer of {crossing, arc} is grabbed and the
 // drag begins.
 //
 // Once grabbed, dragging a crossing translates the crossing point itself
@@ -29,11 +30,23 @@ import (
 // their crossings. Neither operation creates or removes crossings.
 //
 // All distances below are in source-image (canvas) pixels.
+//
+// Touch input gets generously larger hit-targets and a wider drift
+// slack: a finger covers roughly 40 CSS pixels of canvas, can't aim
+// at a 14-pixel target accurately, and trembles ~5–10 pixels while
+// "stationary." Mouse keeps the tighter values so hovering near a
+// crossing without pressing doesn't accidentally light up the
+// hover ring.
 const (
 	grabHoldDuration = time.Second
-	grabRangeCross   = 14.0
-	grabRangeArc     = 10.0
-	grabSlackPx      = 4.0
+
+	grabRangeCrossMouse = 14.0
+	grabRangeArcMouse   = 10.0
+	grabSlackMouse      = 4.0
+
+	grabRangeCrossTouch = 36.0
+	grabRangeArcTouch   = 28.0
+	grabSlackTouch      = 14.0
 )
 
 // dragKind enumerates what the cursor is currently interacting with.
@@ -56,8 +69,8 @@ type dragState struct {
 	// (smoothed) arc length, captured at grab time.
 	arcParam float64
 
-	// pressing tracks whether the left button has been continuously held
-	// since pressDownAt, with the cursor staying within grabSlackPx of
+	// pressing tracks whether the input has been continuously held
+	// since pressDownAt, with the cursor staying within slack of
 	// pressOrigin. holdFired is set once the hold timer elapses and the
 	// grab is committed.
 	pressing    bool
@@ -71,6 +84,13 @@ type dragState struct {
 	// Hover state (for visual feedback when not yet pressed).
 	hoverKind  dragKind
 	hoverIndex int
+
+	// pressFromTouch records whether the active press originated from a
+	// finger touch. Used to pick generous touch-sized hit radii and
+	// slack while the press is in flight; latched at first-press time
+	// so a transient input-source flicker doesn't shrink the radii
+	// mid-grab.
+	pressFromTouch bool
 }
 
 type imagePointF struct{ X, Y float64 }
@@ -86,23 +106,25 @@ func (s *dragState) reset() {
 // d is the current diagram (may be nil); cursor is the cursor position
 // in source-image pixel coordinates; inBounds reports whether the
 // cursor lies within the canvas bounds at all. pressed is the raw
-// left-mouse-button state for this frame.
+// pressed state for this frame; fromTouch is true when the press
+// came from a finger touch (vs a mouse button).
 //
 // Returns true when the diagram polylines were mutated this frame, so
 // the caller knows to re-render the canvas.
-func (s *dragState) update(d *Diagram, cursor imagePointF, inBounds, pressed bool) bool {
+func (s *dragState) update(d *Diagram, cursor imagePointF, inBounds, pressed, fromTouch bool) bool {
 	if d == nil {
 		s.reset()
 		return false
 	}
 
-	// Drop pressing state when the button is released.
+	// Drop pressing state when the button / finger is released.
 	if !pressed {
 		s.pressing = false
 		s.holdFired = false
 		s.dragging = false
 		s.kind = dragNone
-		s.refreshHover(d, cursor, inBounds)
+		s.pressFromTouch = false
+		s.refreshHover(d, cursor, inBounds, fromTouch)
 		return false
 	}
 
@@ -118,13 +140,14 @@ func (s *dragState) update(d *Diagram, cursor imagePointF, inBounds, pressed boo
 	// Pressed but not yet dragging: arm the hold-timer on the first
 	// press while pointing at something grabbable, then promote to a
 	// drag once the timer elapses (and the cursor has stayed within
-	// grabSlackPx of the press origin).
+	// the slack radius of the press origin).
 	if !s.pressing {
-		s.refreshHover(d, cursor, inBounds)
+		s.refreshHover(d, cursor, inBounds, fromTouch)
 		if !inBounds || s.hoverKind == dragNone {
 			return false
 		}
 		s.pressing = true
+		s.pressFromTouch = fromTouch
 		s.pressOrigin = cursor
 		s.pressDownAt = time.Now()
 		s.holdFired = false
@@ -137,12 +160,17 @@ func (s *dragState) update(d *Diagram, cursor imagePointF, inBounds, pressed boo
 
 	// Drift cancels the hold (so pencil strokes still work — the user
 	// has visibly moved the cursor while pressing).
+	slack := grabSlackMouse
+	if s.pressFromTouch {
+		slack = grabSlackTouch
+	}
 	dx := cursor.X - s.pressOrigin.X
 	dy := cursor.Y - s.pressOrigin.Y
-	if dx*dx+dy*dy > grabSlackPx*grabSlackPx {
+	if dx*dx+dy*dy > slack*slack {
 		s.pressing = false
 		s.holdFired = false
 		s.kind = dragNone
+		s.pressFromTouch = false
 		return false
 	}
 
@@ -156,16 +184,24 @@ func (s *dragState) update(d *Diagram, cursor imagePointF, inBounds, pressed boo
 // refreshHover updates hoverKind/hoverIndex so renderers can show a
 // "this is grabbable" indicator. Crossings beat arcs at equal distance
 // because they're the smaller target and easier to mis-grab as an arc.
-func (s *dragState) refreshHover(d *Diagram, cursor imagePointF, inBounds bool) {
+//
+// When fromTouch is true, the hit-test radii are the larger touch
+// values so a finger landing near (but not exactly on) a crossing or
+// arc still grabs.
+func (s *dragState) refreshHover(d *Diagram, cursor imagePointF, inBounds, fromTouch bool) {
 	if !inBounds {
 		s.hoverKind = dragNone
 		return
+	}
+	rangeCross, rangeArc := grabRangeCrossMouse, grabRangeArcMouse
+	if fromTouch {
+		rangeCross, rangeArc = grabRangeCrossTouch, grabRangeArcTouch
 	}
 	bestKind := dragNone
 	bestIdx := -1
 	bestD2 := math.Inf(1)
 
-	rc2 := grabRangeCross * grabRangeCross
+	rc2 := rangeCross * rangeCross
 	for i, c := range d.Crossings {
 		dx := cursor.X - float64(c.X)
 		dy := cursor.Y - float64(c.Y)
@@ -177,7 +213,7 @@ func (s *dragState) refreshHover(d *Diagram, cursor imagePointF, inBounds bool) 
 		}
 	}
 	if bestKind == dragNone {
-		ra2 := grabRangeArc * grabRangeArc
+		ra2 := rangeArc * rangeArc
 		for i, a := range d.Arcs {
 			d2, _ := nearestOnPolyline(a.Polyline, cursor)
 			if d2 <= ra2 && d2 < bestD2 {
@@ -566,6 +602,11 @@ func drawDragOverlay(screen *ebiten.Image, ox, oy, scale float64, d *Diagram, st
 		c = grabColor
 	}
 
+	rangeCross, rangeArc := grabRangeCrossMouse, grabRangeArcMouse
+	if st.pressFromTouch {
+		rangeCross, rangeArc = grabRangeCrossTouch, grabRangeArcTouch
+	}
+
 	switch st.hoverKind {
 	case dragCrossing:
 		if st.hoverIndex < 0 || st.hoverIndex >= len(d.Crossings) {
@@ -574,7 +615,7 @@ func drawDragOverlay(screen *ebiten.Image, ox, oy, scale float64, d *Diagram, st
 		p := d.Crossings[st.hoverIndex]
 		cx := float32(ox) + float32(p.X)*float32(scale)
 		cy := float32(oy) + float32(p.Y)*float32(scale)
-		baseR := float32(grabRangeCross) * float32(scale)
+		baseR := float32(rangeCross) * float32(scale)
 		vector.StrokeCircle(screen, cx, cy, baseR, 2, c, true)
 		if holdProgress > 0 && !st.dragging {
 			// A second concentric ring shrinks toward the center as the
@@ -598,7 +639,7 @@ func drawDragOverlay(screen *ebiten.Image, ox, oy, scale float64, d *Diagram, st
 			// Same pointer source as the input layer so touch-press
 			// shows its hover handle at the finger position, not the
 			// stale mouse cursor.
-			pmx, pmy, _ := primaryPointer()
+			pmx, pmy, _, _ := primaryPointer()
 			cx := (pmx - ox) / scale
 			cy := (pmy - oy) / scale
 			_, t = nearestOnPolyline(a.Polyline, imagePointF{X: cx, Y: cy})
@@ -606,7 +647,7 @@ func drawDragOverlay(screen *ebiten.Image, ox, oy, scale float64, d *Diagram, st
 		hx, hy := pointAtParam(a.Polyline, t)
 		sx := float32(ox) + float32(hx)*float32(scale)
 		sy := float32(oy) + float32(hy)*float32(scale)
-		baseR := float32(grabRangeArc) * float32(scale)
+		baseR := float32(rangeArc) * float32(scale)
 		vector.StrokeCircle(screen, sx, sy, baseR, 2, c, true)
 		if holdProgress > 0 && !st.dragging {
 			ringR := baseR * float32(1.0-0.6*holdProgress)
