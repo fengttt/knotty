@@ -595,9 +595,12 @@ func drawDragOverlay(screen *ebiten.Image, ox, oy, scale float64, d *Diagram, st
 		if st.dragging {
 			t = st.arcParam
 		} else {
-			cursorX, cursorY := ebiten.CursorPosition()
-			cx := (float64(cursorX) - ox) / scale
-			cy := (float64(cursorY) - oy) / scale
+			// Same pointer source as the input layer so touch-press
+			// shows its hover handle at the finger position, not the
+			// stale mouse cursor.
+			pmx, pmy, _ := primaryPointer()
+			cx := (pmx - ox) / scale
+			cy := (pmy - oy) / scale
 			_, t = nearestOnPolyline(a.Polyline, imagePointF{X: cx, Y: cy})
 		}
 		hx, hy := pointAtParam(a.Polyline, t)

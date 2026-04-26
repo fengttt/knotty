@@ -142,6 +142,23 @@ func (s *scaledImage) PreferredSize() (int, int) {
 
 func (s *scaledImage) Validate() {}
 
+// primaryPointer returns the position and pressed state of the active
+// pointing device — touch wins over mouse so the same finger never
+// double-fires through synthetic mouse events. The first active touch
+// (lowest-index in AppendTouchIDs) is the only one consulted; multi-
+// touch gestures aren't part of the drawing/drag UI. On desktop with
+// no touch screen, AppendTouchIDs is always empty and this falls
+// back to mouse.
+func primaryPointer() (x, y float64, pressed bool) {
+	touches := ebiten.AppendTouchIDs(nil)
+	if len(touches) > 0 {
+		tx, ty := ebiten.TouchPosition(touches[0])
+		return float64(tx), float64(ty), true
+	}
+	mx, my := ebiten.CursorPosition()
+	return float64(mx), float64(my), ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+}
+
 func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	s.init.Do()
 	s.widget.Update(updObj)
@@ -186,14 +203,13 @@ func (s *scaledImage) handleDragging() bool {
 	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
 	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
 
-	mx, my := ebiten.CursorPosition()
+	mx, my, pressed := primaryPointer()
 	cursor := imagePointF{
-		X: (float64(mx) - ox) / scale,
-		Y: (float64(my) - oy) / scale,
+		X: (mx - ox) / scale,
+		Y: (my - oy) / scale,
 	}
 	inBounds := cursor.X >= 0 && cursor.Y >= 0 && cursor.X < float64(iw) && cursor.Y < float64(ih)
 
-	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
 	mutated := s.drag.update(s.Diagram, cursor, inBounds, pressed)
 	if mutated && s.OnDiagramChanged != nil {
 		s.OnDiagramChanged()
@@ -232,10 +248,9 @@ func (s *scaledImage) handleDrawing() {
 	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
 	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
 
-	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
-	mx, my := ebiten.CursorPosition()
-	px := (float64(mx) - ox) / scale
-	py := (float64(my) - oy) / scale
+	mx, my, pressed := primaryPointer()
+	px := (mx - ox) / scale
+	py := (my - oy) / scale
 	inBounds := px >= 0 && py >= 0 && px < float64(iw) && py < float64(ih)
 
 	if pressed && inBounds {
