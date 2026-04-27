@@ -23,67 +23,100 @@ func renderDiagram(canvas *ebiten.Image, d *Diagram, bg color.Color) {
 	stroke := color.NRGBA{0x10, 0x10, 0x10, 0xff}
 	const strokeW = float32(3.0)
 	const gapPx = 8.0
-	const subdiv = 6
+	const chaikinIters = 3
 
 	for _, a := range d.Arcs {
-		smooth := smoothCatmullRom(a.Polyline, subdiv)
+		smooth := smoothChaikin(a.Polyline, chaikinIters)
 		poly := trimPolylineEnds(smooth, !a.Start.Over, !a.End.Over, gapPx)
 		strokeSmoothPolyline(canvas, poly, strokeW, stroke)
 	}
 }
 
-// smoothCatmullRom returns a denser polyline that is the uniform
-// Catmull-Rom spline through poly's points. Each input segment becomes
-// `subdiv` straight micro-segments. The first and last input points are
-// kept exactly; virtual control points outside the polyline are obtained
-// by reflecting (2·p[0] − p[1] and 2·p[n-1] − p[n-2]) so the curve has
-// natural-looking tangents at both ends.
-func smoothCatmullRom(poly []image.Point, subdiv int) []image.Point {
-	n := len(poly)
-	if n < 2 || subdiv <= 1 {
+// resamplePolylineUniform returns a polyline with exactly n points sampled
+// at uniform arc-length intervals along poly. The first and last points
+// are preserved exactly; interior points are linearly interpolated within
+// the source segment that contains the corresponding arc-length target.
+//
+// Used to normalize freshly-converted polylines (which can have hundreds
+// of one-pixel-spaced points) down to a small smooth control polygon
+// that the renderer can interpolate cleanly and the drag math can move
+// without amplifying pixel-grid jitter.
+//
+// Returns poly unchanged if it already has the requested point count, has
+// fewer than 2 points, or has zero total length.
+func resamplePolylineUniform(poly []image.Point, n int) []image.Point {
+	if n < 2 || len(poly) < 2 || len(poly) == n {
 		return poly
 	}
-	pt := func(i int) (float64, float64) {
-		switch {
-		case i < 0:
-			return 2*float64(poly[0].X) - float64(poly[1].X),
-				2*float64(poly[0].Y) - float64(poly[1].Y)
-		case i >= n:
-			return 2*float64(poly[n-1].X) - float64(poly[n-2].X),
-				2*float64(poly[n-1].Y) - float64(poly[n-2].Y)
-		default:
-			return float64(poly[i].X), float64(poly[i].Y)
-		}
+	cum := make([]float64, len(poly))
+	for i := 1; i < len(poly); i++ {
+		dx := float64(poly[i].X - poly[i-1].X)
+		dy := float64(poly[i].Y - poly[i-1].Y)
+		cum[i] = cum[i-1] + math.Hypot(dx, dy)
 	}
-
-	out := make([]image.Point, 0, (n-1)*subdiv+1)
-	for i := 0; i < n-1; i++ {
-		p0x, p0y := pt(i - 1)
-		p1x, p1y := pt(i)
-		p2x, p2y := pt(i + 1)
-		p3x, p3y := pt(i + 2)
-		m1x, m1y := (p2x-p0x)/2, (p2y-p0y)/2
-		m2x, m2y := (p3x-p1x)/2, (p3y-p1y)/2
-		if i == 0 {
-			out = append(out, image.Point{
-				X: int(math.Round(p1x)),
-				Y: int(math.Round(p1y)),
-			})
+	total := cum[len(poly)-1]
+	if total == 0 {
+		return poly
+	}
+	out := make([]image.Point, n)
+	out[0] = poly[0]
+	out[n-1] = poly[len(poly)-1]
+	j := 1
+	for k := 1; k < n-1; k++ {
+		target := total * float64(k) / float64(n-1)
+		for j < len(poly)-1 && cum[j] < target {
+			j++
 		}
-		for s := 1; s <= subdiv; s++ {
-			t := float64(s) / float64(subdiv)
-			t2 := t * t
-			t3 := t2 * t
-			h00 := 2*t3 - 3*t2 + 1
-			h10 := t3 - 2*t2 + t
-			h01 := -2*t3 + 3*t2
-			h11 := t3 - t2
-			x := h00*p1x + h10*m1x + h01*p2x + h11*m2x
-			y := h00*p1y + h10*m1y + h01*p2y + h11*m2y
-			out = append(out, image.Point{
-				X: int(math.Round(x)),
-				Y: int(math.Round(y)),
-			})
+		segLen := cum[j] - cum[j-1]
+		t := 0.0
+		if segLen > 0 {
+			t = (target - cum[j-1]) / segLen
+		}
+		x := float64(poly[j-1].X) + t*float64(poly[j].X-poly[j-1].X)
+		y := float64(poly[j-1].Y) + t*float64(poly[j].Y-poly[j-1].Y)
+		out[k] = image.Point{X: int(math.Round(x)), Y: int(math.Round(y))}
+	}
+	return out
+}
+
+// smoothChaikin returns the polyline produced by k iterations of
+// Chaikin's corner-cutting algorithm: each interior segment is replaced
+// with two new points, one a quarter and one three-quarters of the way
+// along it. The first and last points are preserved exactly; interior
+// control points become "directors" that the curve approaches but does
+// not pass through. The limit (k → ∞) is a quadratic uniform B-spline.
+//
+// Crucially, Chaikin is non-interpolating: pixel-grid jitter on
+// interior control points is averaged away rather than amplified into
+// visible wiggles, which Catmull-Rom does. k=3 is plenty for visual
+// smoothness and turns an n-point input into a 2³·(n−1)+2 = 8n−6 point
+// output (~100 points for our 13-point arcs).
+func smoothChaikin(poly []image.Point, k int) []image.Point {
+	if len(poly) < 2 || k <= 0 {
+		return poly
+	}
+	type fp struct{ X, Y float64 }
+	cur := make([]fp, len(poly))
+	for i, p := range poly {
+		cur[i] = fp{float64(p.X), float64(p.Y)}
+	}
+	for iter := 0; iter < k; iter++ {
+		nxt := make([]fp, 0, 2*len(cur))
+		nxt = append(nxt, cur[0])
+		for i := 0; i < len(cur)-1; i++ {
+			a, b := cur[i], cur[i+1]
+			q := fp{X: 0.75*a.X + 0.25*b.X, Y: 0.75*a.Y + 0.25*b.Y}
+			r := fp{X: 0.25*a.X + 0.75*b.X, Y: 0.25*a.Y + 0.75*b.Y}
+			nxt = append(nxt, q, r)
+		}
+		nxt = append(nxt, cur[len(cur)-1])
+		cur = nxt
+	}
+	out := make([]image.Point, len(cur))
+	for i, p := range cur {
+		out[i] = image.Point{
+			X: int(math.Round(p.X)),
+			Y: int(math.Round(p.Y)),
 		}
 	}
 	return out

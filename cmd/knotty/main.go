@@ -100,6 +100,13 @@ type game struct {
 	// lazily and reused so we don't allocate a fresh Image per click.
 	undoSnap *ebiten.Image
 
+	// pendingAttach asks the next Update tick to extract a Diagram from
+	// the canvas via convertImage and attach it to imageWidget. We defer
+	// because ebiten.Image.ReadPixels (used by canvasToImage) cannot run
+	// before RunGame starts, so the initial loadKnot at startup must not
+	// try to convert the canvas synchronously.
+	pendingAttach bool
+
 	face     etext.Face
 	hugeFace etext.Face
 }
@@ -152,6 +159,10 @@ func (g *game) Layout(outW, outH int) (int, int) {
 }
 
 func (g *game) Update() error {
+	if g.pendingAttach {
+		g.pendingAttach = false
+		g.attachDiagramFromCanvas()
+	}
 	g.ui.Update()
 	return nil
 }
@@ -686,12 +697,58 @@ func (g *game) refreshImage() {
 		return
 	}
 	g.blitKnotOnCanvas(img)
-	// Loading a fresh raster discards any previous draggable diagram —
-	// its crossing/arc coordinates referred to the old canvas content.
-	g.imageWidget.Diagram = nil
 	g.imageWidget.DebugCrossings = nil
 	g.imageWidget.DebugArcs = nil
 	g.imageWidget.DebugJunctions = nil
+	// Loading a fresh raster discards any previous draggable diagram —
+	// its crossing/arc coordinates referred to the old canvas content.
+	g.imageWidget.Diagram = nil
+	// Defer the convertImage extraction to the next Update tick. canvasToImage
+	// calls ReadPixels which is illegal before ebiten.RunGame has started, so
+	// loadKnot called from main() at startup cannot attach synchronously.
+	g.pendingAttach = true
+}
+
+// attachDiagramFromCanvas snapshots the canvas, runs convertImage, and
+// attaches the resulting Diagram so the Move tool can grab/drag its
+// crossings and arcs. Polylines from convertImage are pixel-precise
+// (one point per skeleton pixel) which makes the rendered curve jagged
+// and lets drag math amplify the noise; we resample each arc to a fixed
+// small point count first so the curve stays smooth under interaction.
+// Failures are logged and leave Diagram nil.
+func (g *game) attachDiagramFromCanvas() {
+	raster := g.canvasToImage()
+	if raster == nil {
+		g.imageWidget.Diagram = nil
+		return
+	}
+	d, err := convertImage(raster)
+	if err != nil {
+		log.Printf("attach diagram: %v", err)
+		g.imageWidget.Diagram = nil
+		return
+	}
+	resampleDiagramArcs(d, attachedArcPoints)
+	g.imageWidget.Diagram = d
+}
+
+// attachedArcPoints is the number of polyline points each arc is
+// resampled to when a Diagram is attached for interaction. Picked so
+// Catmull-Rom interpolation produces a clean smooth curve and so the
+// drag math has enough handles to deform the arc without compounding
+// pixel-grid jitter.
+const attachedArcPoints = 13
+
+// resampleDiagramArcs replaces every arc's Polyline with a uniform-arc-
+// length resampling to nPoints points. Endpoints are preserved exactly so
+// the polyline still anchors at the crossing positions.
+func resampleDiagramArcs(d *Diagram, nPoints int) {
+	if d == nil {
+		return
+	}
+	for i := range d.Arcs {
+		d.Arcs[i].Polyline = resamplePolylineUniform(d.Arcs[i].Polyline, nPoints)
+	}
 }
 
 // canvasToImage snapshots the current canvas contents into an in-memory
@@ -822,6 +879,8 @@ func (g *game) doConvert() {
 		g.propsArea.SetText(fmt.Sprintf("convert failed: %v\n", err))
 		return
 	}
+	resampleDiagramArcs(d, attachedArcPoints)
+	g.imageWidget.Diagram = d
 	var b strings.Builder
 	fmt.Fprintf(&b, "converted at %s\n", time.Now().Format("15:04:05"))
 	fmt.Fprintf(&b, "crossings: %d\n", len(d.Crossings))
