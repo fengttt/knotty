@@ -237,6 +237,9 @@ func (g *game) buildTopPane() *widget.Container {
 		}
 		renderDiagram(g.imageWidget.Image, g.imageWidget.Diagram, canvasBG)
 	}
+	g.imageWidget.OnLasso = func(closed []stdimage.Point) {
+		g.doReidemeister(closed)
+	}
 	top.AddChild(g.imageWidget)
 	return top
 }
@@ -266,6 +269,9 @@ func (g *game) buildDrawToolbar() *widget.Container {
 	}))
 	row.AddChild(iconButton(moveIcon(), func() {
 		g.imageWidget.Tool = ToolMove
+	}))
+	row.AddChild(iconButton(reidemeisterIcon(), func() {
+		g.imageWidget.Tool = ToolReidemeister
 	}))
 	row.AddChild(g.buildColorCombo())
 	return row

@@ -27,6 +27,12 @@ const (
 	// or arc grabs it immediately and continuous press-motion drags
 	// it. A press over empty space is a no-op.
 	ToolMove = 2
+	// ToolReidemeister collects a free-form pointer-drag into a
+	// closed polygon (the "lasso"). On release, OnLasso is invoked
+	// with the closed point list so the host can detect-and-rewrite a
+	// Reidemeister move on the underlying Diagram. While the user is
+	// dragging, the lasso path is overlayed on the canvas.
+	ToolReidemeister = 3
 )
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
@@ -69,6 +75,20 @@ type scaledImage struct {
 	OnDiagramChanged func()
 
 	drag dragState
+
+	// lassoPath is the cursor path collected during a ToolReidemeister
+	// drag. Coordinates are in source-image (canvas) pixels. Empty when
+	// no lasso is in progress; the host clears it (via OnLasso) only
+	// after consuming a completed lasso, otherwise the overlay keeps
+	// painting it. Reset on every press to start a fresh path.
+	lassoPath    []image.Point
+	lassoPressed bool
+
+	// OnLasso is invoked with the auto-closed lasso polygon (last
+	// point == first point, in source-image pixel coordinates) once
+	// the pointer is released after a ToolReidemeister drag. nil
+	// disables the tool's effect (it still draws the overlay).
+	OnLasso func(closed []image.Point)
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -171,13 +191,103 @@ func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	// press into the drag state machine; Pencil/Eraser route into
 	// handleDrawing. The two are mutually exclusive — switching tools
 	// resets stale state on whichever side just lost the input.
-	if s.Tool == ToolMove {
+	switch s.Tool {
+	case ToolMove:
 		s.drawing = false
+		s.lassoReset()
 		s.handleDragging()
-	} else {
+	case ToolReidemeister:
+		s.drawing = false
 		s.drag.reset()
+		s.handleLasso()
+	default:
+		s.drag.reset()
+		s.lassoReset()
 		s.handleDrawing()
 	}
+}
+
+// lassoReset clears any in-progress lasso state. Called when the user
+// switches away from ToolReidemeister so a partially-collected lasso
+// doesn't linger as a visual overlay.
+func (s *scaledImage) lassoReset() {
+	s.lassoPath = nil
+	s.lassoPressed = false
+}
+
+// handleLasso collects pointer drags into s.lassoPath while the
+// pointer is pressed. On release (after at least 3 points have been
+// collected so we have an actual polygon), the path is auto-closed by
+// appending the first point and OnLasso is fired. Points are recorded
+// in source-image pixel coordinates; consecutive duplicates and very-
+// close-together points are filtered out so the path stays short
+// enough for cheap point-in-polygon tests.
+func (s *scaledImage) handleLasso() {
+	if s.Image == nil {
+		return
+	}
+	ib := s.Image.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
+	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
+		return
+	}
+	sx := float64(rw) / float64(iw)
+	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
+
+	mx, my, pressed, _ := primaryPointer()
+	px := (mx - ox) / scale
+	py := (my - oy) / scale
+	inBounds := px >= 0 && py >= 0 && px < float64(iw) && py < float64(ih)
+
+	if pressed {
+		if !s.lassoPressed {
+			// New lasso. Reset path and seed with first point.
+			s.lassoPath = s.lassoPath[:0]
+			if inBounds {
+				s.lassoPath = append(s.lassoPath, image.Point{X: int(px), Y: int(py)})
+			}
+			s.lassoPressed = true
+			return
+		}
+		if !inBounds {
+			return
+		}
+		cur := image.Point{X: int(px), Y: int(py)}
+		if n := len(s.lassoPath); n == 0 {
+			s.lassoPath = append(s.lassoPath, cur)
+		} else if last := s.lassoPath[n-1]; last != cur {
+			dx, dy := cur.X-last.X, cur.Y-last.Y
+			if dx*dx+dy*dy >= 4 { // ≥ 2 px from previous sample
+				s.lassoPath = append(s.lassoPath, cur)
+			}
+		}
+		return
+	}
+	// Pointer released this frame.
+	if !s.lassoPressed {
+		return
+	}
+	s.lassoPressed = false
+	if len(s.lassoPath) >= 3 {
+		// Auto-close: append the first point so the polygon is closed
+		// and the host's point-in-polygon test sees the loop edge.
+		closed := make([]image.Point, len(s.lassoPath)+1)
+		copy(closed, s.lassoPath)
+		closed[len(s.lassoPath)] = s.lassoPath[0]
+		if s.OnLasso != nil {
+			s.OnLasso(closed)
+		}
+	}
+	s.lassoPath = nil
 }
 
 // handleDragging routes pointer input into the drag state machine.
@@ -338,6 +448,35 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	// Drag hover/grab overlay sits above the canvas and below the debug
 	// markers so the debug overlay (when enabled) is never occluded.
 	drawDragOverlay(screen, ox, oy, scale, s.Diagram, &s.drag)
+
+	// In-progress lasso path. Drawn on every frame as long as
+	// lassoPath is non-empty (set during pointer drag in
+	// handleLasso). Translucent magenta so it reads as transient.
+	if len(s.lassoPath) >= 2 {
+		lc := color.NRGBA{0xc8, 0x40, 0xff, 0xb0}
+		for i := 0; i+1 < len(s.lassoPath); i++ {
+			p := s.lassoPath[i]
+			q := s.lassoPath[i+1]
+			vector.StrokeLine(screen,
+				float32(ox)+float32(p.X)*float32(scale),
+				float32(oy)+float32(p.Y)*float32(scale),
+				float32(ox)+float32(q.X)*float32(scale),
+				float32(oy)+float32(q.Y)*float32(scale),
+				2, lc, true)
+		}
+		// Soft preview of the closing segment so the user sees what
+		// shape the auto-close will make.
+		if s.lassoPressed && len(s.lassoPath) >= 3 {
+			p := s.lassoPath[len(s.lassoPath)-1]
+			q := s.lassoPath[0]
+			vector.StrokeLine(screen,
+				float32(ox)+float32(p.X)*float32(scale),
+				float32(oy)+float32(p.Y)*float32(scale),
+				float32(ox)+float32(q.X)*float32(scale),
+				float32(oy)+float32(q.Y)*float32(scale),
+				1, color.NRGBA{0xc8, 0x40, 0xff, 0x60}, true)
+		}
+	}
 
 	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 && len(s.DebugJunctions) == 0 {
 		return

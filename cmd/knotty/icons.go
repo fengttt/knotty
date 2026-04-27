@@ -22,9 +22,10 @@ const iconSize = 24
 //go:embed NotoSansSymbols2-Regular.ttf
 var notoSymbolsTTF []byte
 
-// materialSymbolsTTF is a 3-glyph subset of Material Symbols Outlined
-// (Apache 2.0). It supplies U+E166 (undo), U+E65F (auto_awesome, used
-// for Beautify), and U+E6D0 (ink_eraser).
+// materialSymbolsTTF is a 4-glyph subset of Material Symbols Outlined
+// (Apache 2.0). It supplies U+E155 (gesture, used as the Reidemeister-
+// move tool icon), U+E166 (undo), U+E65F (auto_awesome, used for
+// Beautify), and U+E6D0 (ink_eraser).
 //
 //go:embed MaterialSymbols-subset.ttf
 var materialSymbolsTTF []byte
@@ -84,6 +85,12 @@ func beautifyIcon() *ebiten.Image {
 // undoIcon renders U+E166 (Material Symbols "undo") in soft amber.
 func undoIcon() *ebiten.Image {
 	return glyphIconFace(materialFace, "", color.NRGBA{0xff, 0xc8, 0x70, 0xff})
+}
+
+// reidemeisterIcon renders U+E155 (Material Symbols "gesture") in a
+// pale lavender as the Reidemeister-move (lasso) tool icon.
+func reidemeisterIcon() *ebiten.Image {
+	return glyphIconFace(materialFace, "", color.NRGBA{0xc8, 0xb0, 0xff, 0xff})
 }
 
 // moveIcon draws a four-headed arrow (the standard "move" cursor
