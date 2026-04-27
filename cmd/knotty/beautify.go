@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"log"
 	"math"
 )
 
@@ -17,6 +18,7 @@ import (
 // the outer face, pins its perimeter on a regular polygon, and solves the
 // barycentric (Tutte) linear system for the remaining vertex positions.
 func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
+	orig := d
 	if len(d.Crossings) == 0 {
 		return d, nil
 	}
@@ -26,6 +28,7 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	}
 
 	bg := newBgraphFromDart(g, len(d.Crossings))
+	bg0 := bg
 
 	// Track each arc as an alternating sequence of vertex IDs and the dart
 	// connecting consecutive verts. Initially: [startCrossing, endCrossing]
@@ -70,6 +73,7 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	for _, d := range cur.verts[outer].darts {
 		fd := cur.faceDarts(d)
 		if fd == nil {
+			dumpBeautifyFailure(orig, bg0, cur, outer, d)
 			return nil, fmt.Errorf("beautify: face walk failed at outer dart %d", d)
 		}
 		verts := make([]int, len(fd))
@@ -162,10 +166,14 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	}
 
 	if err := rowReduce(matX); err != nil {
-		return nil, fmt.Errorf("beautify: x system: %v", err)
+		return nil, fmt.Errorf("beautify: cannot solve layout — diagram is "+
+			"too simple for Tutte embedding (the underlying graph is not "+
+			"3-connected; try a more complex starting diagram or fewer "+
+			"R1 simplifications). Inner error: %v", err)
 	}
 	if err := rowReduce(matY); err != nil {
-		return nil, fmt.Errorf("beautify: y system: %v", err)
+		return nil, fmt.Errorf("beautify: cannot solve layout — diagram is "+
+			"too simple for Tutte embedding. Inner error: %v", err)
 	}
 
 	// Extract solved positions.
@@ -355,7 +363,14 @@ func (g *bgraph) medial() (*bgraph, medialRemap) {
 		dartByKey[key] = d
 		return d
 	}
-	vertEdgeKey := func(vid, ae int) string { return fmt.Sprintf("V%d:E%d", vid, ae) }
+	// vertEdgeKey is keyed on the *signed* dart, not |dart|. For a
+	// regular edge between distinct endpoints, +d and -d live at
+	// different vertices so the unsigned key suffices. For a self-loop
+	// edge, +d and -d live at the *same* vertex, so an unsigned key
+	// would collide and produce the same fresh dart for both —
+	// breaking the post-subdivision rotation system. Signed keys
+	// distinguish them.
+	vertEdgeKey := func(vid, d int) string { return fmt.Sprintf("V%d:D%d", vid, d) }
 	edgeFaceKey := func(ae, fc int) string { return fmt.Sprintf("E%d:F%d", ae, fc) }
 
 	// Phase 1: rename old verts. Each old vert v becomes a new vert with
@@ -364,7 +379,7 @@ func (g *bgraph) medial() (*bgraph, medialRemap) {
 	for vid, v := range g.verts {
 		nv := bvert{typ: v.typ + "v"}
 		for _, d := range v.darts {
-			nd := dartFor(vertEdgeKey(vid, absi(d)))
+			nd := dartFor(vertEdgeKey(vid, d))
 			nv.darts = append(nv.darts, nd)
 			out.dartVert[nd] = vid
 			rm.leftDart[d] = nd
@@ -393,10 +408,14 @@ func (g *bgraph) medial() (*bgraph, medialRemap) {
 			fR := g.faceCanonDart(d)
 			fL := g.faceCanonDart(-d)
 
+			// Phase 1 named the dart at u for this edge using the
+			// signed dart d (which lives at u). Use the matching key
+			// here so d1 (the midpoint's "back to u" dart) negates
+			// the same fresh ID. d3 mirrors that for -d at uOther.
 			d0 := dartFor(edgeFaceKey(ae, fR))
-			d1 := -dartFor(vertEdgeKey(u, ae))
+			d1 := -dartFor(vertEdgeKey(u, d))
 			d2 := dartFor(edgeFaceKey(ae, fL))
-			d3 := -dartFor(vertEdgeKey(uOther, ae))
+			d3 := -dartFor(vertEdgeKey(uOther, -d))
 
 			mvid := len(out.verts)
 			out.verts = append(out.verts, bvert{typ: "e", darts: []int{d0, d1, d2, d3}})
@@ -519,4 +538,65 @@ func rowReduce(m [][]float64) error {
 		return fmt.Errorf("singular: %d/%d pivots", i, rows)
 	}
 	return nil
+}
+
+// dumpBeautifyFailure logs the originating Diagram, the un-subdivided
+// bgraph (bg0), and the failure-stage bgraph (cur) when a face-walk
+// can't close. Called from Beautify on the unrecoverable error path.
+func dumpBeautifyFailure(d *Diagram, bg0 *bgraph, cur *bgraph, outer, badDart int) {
+	log.Printf("BFY: face walk failed at outer=%d dart=%d", outer, badDart)
+	log.Printf("BFY: orig diagram: %d crossings, %d arcs", len(d.Crossings), len(d.Arcs))
+	for i, c := range d.Crossings {
+		log.Printf("BFY:   C%d @ (%d,%d)", i, c.X, c.Y)
+	}
+	for i, a := range d.Arcs {
+		log.Printf("BFY:   A%d C%d(%s)→C%d(%s) %d pts",
+			i, a.Start.Crossing, overTag(a.Start.Over),
+			a.End.Crossing, overTag(a.End.Over), len(a.Polyline))
+	}
+	log.Printf("BFY: bg0 (pre-subdiv): %d verts", len(bg0.verts))
+	for i, v := range bg0.verts {
+		log.Printf("BFY:   bg0 V%d typ=%q darts=%v", i, v.typ, v.darts)
+	}
+	// Trace the failing face walk one step at a time so we see exactly
+	// which dart's negative is missing.
+	log.Printf("BFY: cur (post-subdiv): %d verts", len(cur.verts))
+	log.Printf("BFY: outer V%d darts: %v", outer, cur.verts[outer].darts)
+	cur2 := badDart
+	for step := 0; step < 8; step++ {
+		v := cur.endVert(cur2)
+		log.Printf("BFY: walk step %d: cur=%d, end=V%d, adj=%v",
+			step, cur2, v, cur.verts[v].darts)
+		idx := -1
+		for k, dd := range cur.verts[v].darts {
+			if dd == -cur2 {
+				idx = k
+				break
+			}
+		}
+		if idx < 0 {
+			log.Printf("BFY:   FAIL: -%d not in V%d.darts", cur2, v)
+			return
+		}
+		cur2 = cur.verts[v].darts[(idx+len(cur.verts[v].darts)-1)%len(cur.verts[v].darts)]
+	}
+}
+
+// dumpDiagram logs a Diagram's structure. Invoked from doReidemeister
+// after a successful R1/R2 rewrite so we can compare states before
+// and after a Beautify failure.
+func dumpDiagramState(label string, d *Diagram) {
+	if d == nil {
+		log.Printf("DUMP %s: nil", label)
+		return
+	}
+	log.Printf("DUMP %s: %d crossings, %d arcs", label, len(d.Crossings), len(d.Arcs))
+	for i, c := range d.Crossings {
+		log.Printf("DUMP %s:   C%d @ (%d,%d)", label, i, c.X, c.Y)
+	}
+	for i, a := range d.Arcs {
+		log.Printf("DUMP %s:   A%d C%d(%s)→C%d(%s) %d pts",
+			label, i, a.Start.Crossing, overTag(a.Start.Over),
+			a.End.Crossing, overTag(a.End.Over), len(a.Polyline))
+	}
 }

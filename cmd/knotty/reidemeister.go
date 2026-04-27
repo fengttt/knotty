@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"log"
 )
 
 // doReidemeister consumes a closed lasso polygon (in source-image pixel
@@ -27,7 +28,12 @@ func (g *game) doReidemeister(closed []image.Point) {
 	// Snapshot the canvas for Undo before we mutate the diagram.
 	g.snapshotCanvas()
 
+	log.Printf("reidemeister: lasso closed, %d points, diagram has %d crossings, %d arcs",
+		len(closed)-1, len(d.Crossings), len(d.Arcs))
+
 	if r1, ok := detectR1(d, closed); ok {
+		log.Printf("reidemeister: R1 hit crossing=%d loop=%d carrier1=%d carrier2=%d",
+			r1.crossing, r1.loop, r1.carrier1, r1.carrier2)
 		applyR1(d, r1)
 		resampleDiagramArcs(d, attachedArcPoints)
 		renderDiagram(g.imageWidget.Image, d, canvasBG)
@@ -35,6 +41,10 @@ func (g *game) doReidemeister(closed []image.Point) {
 		return
 	}
 	if r2, ok := detectR2(d, closed); ok {
+		log.Printf("reidemeister: R2 hit v=%d w=%d arcA=%d arcB=%d "+
+			"vOver=%d vUnd=%d wOver=%d wUnd=%d",
+			r2.v, r2.w, r2.arcA, r2.arcB,
+			r2.vOverArc, r2.vUndArc, r2.wOverArc, r2.wUndArc)
 		applyR2(d, r2)
 		resampleDiagramArcs(d, attachedArcPoints)
 		renderDiagram(g.imageWidget.Image, d, canvasBG)
@@ -43,14 +53,89 @@ func (g *game) doReidemeister(closed []image.Point) {
 		return
 	}
 
-	insideCrossings := 0
-	for _, c := range d.Crossings {
-		if closedPolygonContainsPoint(closed, c) {
-			insideCrossings++
+	diag := reidemeisterDiagnose(d, closed)
+	log.Print("reidemeister: no R1/R2 found.\n", diag)
+	g.propsArea.SetText(diag)
+}
+
+// reidemeisterDiagnose builds a multi-line description of what the
+// detector saw inside the lasso and why no move matched. Used to
+// surface the failure to the user when neither R1 nor R2 fires.
+//
+// Includes the lasso's bounding box and the position of every
+// crossing (with inside-flag), so we can tell whether the user's
+// lasso is missing the underlying Diagram coordinates entirely
+// (e.g. the loaded picture's crossings sit at different pixel
+// positions than the user expects).
+func reidemeisterDiagnose(d *Diagram, lasso []image.Point) string {
+	bbox := lassoBBox(lasso)
+	var insideC []int
+	var b []byte
+	b = append(b, "RDX: no R1/R2 found.\n"...)
+	b = append(b, fmt.Sprintf("RDX: lasso bbox x=[%d,%d] y=[%d,%d] (%d pts)\n",
+		bbox.Min.X, bbox.Max.X, bbox.Min.Y, bbox.Max.Y, len(lasso)-1)...)
+	b = append(b, fmt.Sprintf("RDX: %d crossings, %d arcs total\n",
+		len(d.Crossings), len(d.Arcs))...)
+	for i, c := range d.Crossings {
+		inside := closedPolygonContainsPoint(lasso, c)
+		flag := "OUT"
+		if inside {
+			flag = "IN "
+			insideC = append(insideC, i)
+		}
+		b = append(b, fmt.Sprintf("RDX:   C%d %s @ (%d,%d)\n", i, flag, c.X, c.Y)...)
+	}
+	for i, a := range d.Arcs {
+		any, all := arcInLassoStats(lasso, a.Polyline)
+		state := "out"
+		if all {
+			state = "FULL"
+		} else if any {
+			state = "part"
+		}
+		ptsIn := 0
+		for _, p := range a.Polyline {
+			if closedPolygonContainsPoint(lasso, p) {
+				ptsIn++
+			}
+		}
+		b = append(b, fmt.Sprintf("RDX:   A%d %s C%d(%s)→C%d(%s) %d/%d pts in\n",
+			i, state, a.Start.Crossing, overTag(a.Start.Over),
+			a.End.Crossing, overTag(a.End.Over), ptsIn, len(a.Polyline))...)
+	}
+	_ = insideC
+	return string(b)
+}
+
+// lassoBBox returns the axis-aligned bounding rectangle of the lasso
+// polygon, in source-image pixel coordinates.
+func lassoBBox(lasso []image.Point) image.Rectangle {
+	if len(lasso) == 0 {
+		return image.Rectangle{}
+	}
+	r := image.Rectangle{Min: lasso[0], Max: lasso[0]}
+	for _, p := range lasso[1:] {
+		if p.X < r.Min.X {
+			r.Min.X = p.X
+		}
+		if p.X > r.Max.X {
+			r.Max.X = p.X
+		}
+		if p.Y < r.Min.Y {
+			r.Min.Y = p.Y
+		}
+		if p.Y > r.Max.Y {
+			r.Max.Y = p.Y
 		}
 	}
-	g.propsArea.SetText(fmt.Sprintf(
-		"reidemeister: no R1/R2 found in lasso (%d crossings inside)\n", insideCrossings))
+	return r
+}
+
+func overTag(over bool) string {
+	if over {
+		return "over"
+	}
+	return "under"
 }
 
 // arcInLassoStats reports whether at least one polyline point lies
@@ -106,22 +191,31 @@ func closedPolygonContainsPoint(poly []image.Point, p image.Point) bool {
 // ----- R1 simplification (kink removal) -----
 
 // r1Hit names the rewrite a successful R1 detector found: the kink
-// crossing, the self-loop arc, the arc whose End is at the kink (the
-// "incoming" carrier), and the arc whose Start is at the kink (the
-// "outgoing" carrier). All indices refer to the input Diagram before
-// the rewrite.
+// crossing, the self-loop arc, and the two non-loop arcs at the
+// crossing (whose endpoints there are on opposite strands — one
+// over, one under). The two non-loop arcs are spliced into a single
+// arc bypassing the crossing; their dart directions (Start vs End at
+// v) are not constrained, since spliceArcsThroughCrossings handles
+// arbitrary orientations.
 type r1Hit struct {
 	crossing int
 	loop     int
-	inArc    int
-	outArc   int
+	carrier1 int // non-loop arc whose endpoint at v has Over = !L.End.Over (matches L.Start.Over)
+	carrier2 int // non-loop arc whose endpoint at v has Over = !L.Start.Over (matches L.End.Over)
 }
 
 // detectR1 returns an r1Hit if the lasso encloses exactly one crossing
 // and exactly one fully-inside arc that is a self-loop at that
-// crossing, with the carrier strand passing through (i.e. the other
-// two darts at the crossing belong to two distinct outside arcs whose
-// over/under flags match — they're a continuous strand).
+// crossing whose two endpoints there have opposite over flags (the
+// loop crosses itself), and the other two darts at the crossing
+// belong to two distinct non-loop arcs with one over endpoint and
+// one under endpoint there.
+//
+// Note: convertImage may label arc directions inconsistently — at a
+// kink crossing, both non-loop arcs may *start* at the crossing
+// rather than the textbook "one starts, one ends" pattern. This
+// detector identifies them by over-flag, not by direction, and
+// leaves the splice mechanics to spliceArcsThroughCrossings.
 func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 	var zero r1Hit
 	insideC := []int{}
@@ -148,45 +242,60 @@ func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 	if d.Arcs[loop].Start.Crossing != v || d.Arcs[loop].End.Crossing != v {
 		return zero, false
 	}
-	// The kink loop crosses itself at v: its two endpoints there must
-	// have opposite over flags. (If they were equal the configuration
-	// is degenerate.)
+	// Loop must really cross itself at v: opposite over flags.
 	if d.Arcs[loop].Start.Over == d.Arcs[loop].End.Over {
 		return zero, false
 	}
-	// Find the carrier "incoming" and "outgoing" arcs at v, i.e. the
-	// arcs that have an endpoint at v that is NOT the loop.
-	inArc, outArc := -1, -1
+	// Walk every other arc and bin by (which endpoint is at v, what
+	// over-flag does that endpoint have). For a clean kink there
+	// must be exactly one over and one under non-loop endpoint at v
+	// — and they must come from two distinct arcs (a second self-
+	// loop at v is a degenerate "double kink at v" we don't handle).
+	overEnd := -1
+	undEnd := -1
 	for i, a := range d.Arcs {
 		if i == loop {
 			continue
 		}
-		if a.End.Crossing == v {
-			if inArc != -1 {
-				return zero, false
-			}
-			inArc = i
-		}
 		if a.Start.Crossing == v {
-			if outArc != -1 {
-				return zero, false
+			if a.Start.Over {
+				if overEnd != -1 {
+					return zero, false
+				}
+				overEnd = i
+			} else {
+				if undEnd != -1 {
+					return zero, false
+				}
+				undEnd = i
 			}
-			outArc = i
+		}
+		if a.End.Crossing == v {
+			if a.End.Over {
+				if overEnd != -1 {
+					return zero, false
+				}
+				overEnd = i
+			} else {
+				if undEnd != -1 {
+					return zero, false
+				}
+				undEnd = i
+			}
 		}
 	}
-	if inArc < 0 || outArc < 0 {
+	if overEnd < 0 || undEnd < 0 || overEnd == undEnd {
 		return zero, false
 	}
-	// Carrier is a continuous strand through v: same over/under at v.
-	if d.Arcs[inArc].End.Over != d.Arcs[outArc].Start.Over {
-		return zero, false
+	// Pair the carriers with the loop's same-over-flag endpoints. The
+	// loop's start has flag X; carrier whose v-endpoint is X is the
+	// "before-the-kink" side (carrier1). carrier2 mirrors that with
+	// the opposite flag.
+	c1, c2 := overEnd, undEnd
+	if !d.Arcs[loop].Start.Over {
+		c1, c2 = undEnd, overEnd
 	}
-	// Self-loop carrier (inArc == outArc) is the degenerate "unknot
-	// with two kinks" — bail; the user can split that case manually.
-	if inArc == outArc {
-		return zero, false
-	}
-	return r1Hit{crossing: v, loop: loop, inArc: inArc, outArc: outArc}, true
+	return r1Hit{crossing: v, loop: loop, carrier1: c1, carrier2: c2}, true
 }
 
 // applyR1 performs the kink-removal rewrite: drops the crossing and
@@ -195,21 +304,9 @@ func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 // place; arc indices and crossing indices in the resulting Diagram
 // are renumbered so they remain contiguous.
 func applyR1(d *Diagram, r r1Hit) {
-	in := d.Arcs[r.inArc]
-	out := d.Arcs[r.outArc]
-	// New polyline: in.Polyline, dropping the duplicated crossing
-	// point shared with out.Polyline[0], then concatenated with
-	// out.Polyline.
-	poly := make([]image.Point, 0, len(in.Polyline)+len(out.Polyline)-1)
-	poly = append(poly, in.Polyline...)
-	if len(poly) > 0 && len(out.Polyline) > 0 && poly[len(poly)-1] == out.Polyline[0] {
-		poly = poly[:len(poly)-1]
-	}
-	poly = append(poly, out.Polyline...)
-	merged := Arc{Polyline: poly, Start: in.Start, End: out.End}
+	merged := spliceArcsThroughCrossings(d, r.carrier1, r.crossing, r.carrier2, r.crossing)
 
-	// Remove the loop arc, the in arc, and the out arc; append the merged.
-	drop := map[int]bool{r.loop: true, r.inArc: true, r.outArc: true}
+	drop := map[int]bool{r.loop: true, r.carrier1: true, r.carrier2: true}
 	newArcs := make([]Arc, 0, len(d.Arcs)-3+1)
 	for i, a := range d.Arcs {
 		if drop[i] {
@@ -220,9 +317,9 @@ func applyR1(d *Diagram, r r1Hit) {
 	newArcs = append(newArcs, merged)
 	d.Arcs = newArcs
 
-	// Drop crossing v.
+	// Drop crossing v and renumber every Crossing reference in
+	// remaining arcs.
 	d.Crossings = append(d.Crossings[:r.crossing], d.Crossings[r.crossing+1:]...)
-	// Renumber every Crossing reference in remaining arcs.
 	for i := range d.Arcs {
 		fixCrossingRef(&d.Arcs[i].Start.Crossing, r.crossing)
 		fixCrossingRef(&d.Arcs[i].End.Crossing, r.crossing)

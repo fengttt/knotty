@@ -72,10 +72,15 @@ func TestClosedPolygonContainsPointDegenerate(t *testing.T) {
 //	C0 = (100,100): kink crossing
 //	C1 = (300,100): remote crossing
 //	Arcs (in this order — used to predict indices in tests):
-//	  0: L  — kink loop at C0  (Start.Over true, End.Over false)
-//	  1: A  — carrier C0 → C1  (Start.Over true at C0)
-//	  2: B  — carrier C1 → C0  (End.Over true at C0)
+//	  0: L  — kink loop at C0  (over at start, under at end)
+//	  1: A  — carrier-over C0 → C1  (Start.Over true at C0)
+//	  2: B  — carrier-under C1 → C0 (End.Over false at C0)
 //	  3: K  — self-loop at C1
+//
+// At C0 the four darts are +A (over), +L (over), -L (under), -B
+// (under) — valid 2-over / 2-under split. The carrier strand is
+// over (entering via A) before the kink and under (exiting via B)
+// after, matching the canonical R1 over/under-flip.
 func makeR1Diagram() *Diagram {
 	c0 := image.Point{X: 100, Y: 100}
 	c1 := image.Point{X: 300, Y: 100}
@@ -94,8 +99,8 @@ func makeR1Diagram() *Diagram {
 			},
 			{
 				Polyline: []image.Point{c1, {200, 110}, c0},
-				Start:    Endpoint{Crossing: 1, Over: false},
-				End:      Endpoint{Crossing: 0, Over: true},
+				Start:    Endpoint{Crossing: 1, Over: true},
+				End:      Endpoint{Crossing: 0, Over: false},
 			},
 			{
 				Polyline: []image.Point{c1, {290, 80}, {310, 80}, c1},
@@ -128,13 +133,14 @@ func TestDetectR1Simple(t *testing.T) {
 	if r1.loop != 0 {
 		t.Errorf("loop = %d, want 0 (the L arc)", r1.loop)
 	}
-	// inArc is the arc whose End is at C0 (not L) → B (index 2).
-	// outArc is the arc whose Start is at C0 (not L) → A (index 1).
-	if r1.inArc != 2 {
-		t.Errorf("inArc = %d, want 2", r1.inArc)
+	// L.Start.Over=true → carrier1 is the non-loop arc whose
+	// v-endpoint is over → A (index 1). carrier2 is the under one
+	// → B (index 2).
+	if r1.carrier1 != 1 {
+		t.Errorf("carrier1 = %d, want 1", r1.carrier1)
 	}
-	if r1.outArc != 1 {
-		t.Errorf("outArc = %d, want 1", r1.outArc)
+	if r1.carrier2 != 2 {
+		t.Errorf("carrier2 = %d, want 2", r1.carrier2)
 	}
 }
 
