@@ -422,23 +422,39 @@ func detectR2(d *Diagram, lasso []image.Point) (r2Hit, bool) {
 	overAvAtW := arcOverAtCrossing(d.Arcs[arcA], w)
 	overBvAtV := arcOverAtCrossing(d.Arcs[arcB], v)
 	overBvAtW := arcOverAtCrossing(d.Arcs[arcB], w)
-	// R2 alternation: each arc flips over/under between v and w.
-	if overAvAtV == overAvAtW || overBvAtV == overBvAtW {
+	// R2 (the "twist" — one strand passes over another twice and can
+	// be lifted off): both interior arcs keep the SAME over flag at
+	// both crossings (one arc is over→over, the other is under→
+	// under). Trefoil-style "linked" bigons have the alternating
+	// pattern (over→under and under→over) and cannot be removed by
+	// R2 alone — those are correctly rejected here.
+	if overAvAtV != overAvAtW || overBvAtV != overBvAtW {
 		return zero, false
 	}
-	// And at each crossing, the two interior arcs must lie on
-	// opposite strands (one over, one under).
+	// At each crossing the two interior arcs must lie on opposite
+	// strands (one over, one under).
 	if overAvAtV == overBvAtV || overAvAtW == overBvAtW {
 		return zero, false
 	}
 
-	// Find exterior carrier arcs at v and w. At each crossing there
-	// should be exactly one over-strand exterior arc and one under-
-	// strand exterior arc — anything else is a degenerate setup.
+	// Find exterior carrier arcs at v and w. We need ONE over-strand
+	// exterior arc and ONE under-strand exterior arc at each crossing.
+	// If either crossing has a self-loop arc as its only exterior
+	// (two endpoints at the same crossing — a kink directly attached
+	// to the bigon), the simple two-strand splice doesn't apply: the
+	// merge must absorb the self-loop polyline into a single arc
+	// instead of producing two separate merged arcs. We bail in that
+	// case until the more complex splice is implemented.
 	vOver, vUnd, wOver, wUnd := -1, -1, -1, -1
 	for i, a := range d.Arcs {
 		if i == arcA || i == arcB {
 			continue
+		}
+		if a.Start.Crossing == v && a.End.Crossing == v {
+			return zero, false // self-loop at v as exterior — not yet supported
+		}
+		if a.Start.Crossing == w && a.End.Crossing == w {
+			return zero, false // self-loop at w — not yet supported
 		}
 		if arcEndpointAtCrossing(a, v) >= 0 {
 			over := arcOverAtCrossing(a, v)
@@ -454,9 +470,6 @@ func detectR2(d *Diagram, lasso []image.Point) (r2Hit, bool) {
 				vUnd = i
 			}
 		}
-		// An arc may touch BOTH v and w (it could be one of the
-		// carriers spanning the gap). The Start/End check at w must
-		// run independently of the v branch.
 		if arcEndpointAtCrossing(a, w) >= 0 {
 			over := arcOverAtCrossing(a, w)
 			if over {
@@ -485,12 +498,13 @@ func detectR2(d *Diagram, lasso []image.Point) (r2Hit, bool) {
 // the bigon used to be. d is mutated in place; arc / crossing
 // indices are renumbered to stay contiguous.
 //
-// The pairing is determined by the R2 alternation: the strand that
-// is over at v is under at w (and vice versa), so we splice
-// (vOver ↔ wUnd) and (vUnd ↔ wOver).
+// In an R2-removable (twist) bigon, each strand keeps the same
+// over/under flag at both crossings — the over-strand stays on top
+// through both, the under-strand stays under at both. So the splice
+// pairing is (vOver ↔ wOver) and (vUnd ↔ wUnd).
 func applyR2(d *Diagram, r r2Hit) {
-	merged1 := spliceArcsThroughCrossings(d, r.vOverArc, r.v, r.wUndArc, r.w)
-	merged2 := spliceArcsThroughCrossings(d, r.vUndArc, r.v, r.wOverArc, r.w)
+	merged1 := spliceArcsThroughCrossings(d, r.vOverArc, r.v, r.wOverArc, r.w)
+	merged2 := spliceArcsThroughCrossings(d, r.vUndArc, r.v, r.wUndArc, r.w)
 
 	drop := map[int]bool{
 		r.arcA: true, r.arcB: true,

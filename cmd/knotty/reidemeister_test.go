@@ -175,9 +175,10 @@ func TestApplyR1ProducesCorrectShape(t *testing.T) {
 }
 
 // makeR2Diagram builds a 4-crossing Diagram whose first two crossings
-// (C0, C1) form a poke-through bigon. The other two (C2, C3) absorb
-// the four exterior carrier arcs and each carries a self-loop so the
-// graph is well-formed.
+// (C0, C1) form a removable R2 (twist) bigon: the over-strand stays
+// over at both C0 and C1, the under-strand stays under at both. The
+// other two (C2, C3) absorb the four exterior carrier arcs and each
+// carries a self-loop so the graph is well-formed.
 func makeR2Diagram() *Diagram {
 	c0 := image.Point{X: 100, Y: 100}
 	c1 := image.Point{X: 200, Y: 100}
@@ -186,17 +187,17 @@ func makeR2Diagram() *Diagram {
 	d := &Diagram{
 		Crossings: []image.Point{c0, c1, c2, c3},
 		Arcs: []Arc{
-			// 0: arcA — interior, strand X (over at C0, under at C1)
+			// 0: arcA — interior, over-strand stays OVER at C0 and C1
 			{
 				Polyline: []image.Point{c0, {150, 90}, c1},
 				Start:    Endpoint{Crossing: 0, Over: true},
-				End:      Endpoint{Crossing: 1, Over: false},
+				End:      Endpoint{Crossing: 1, Over: true},
 			},
-			// 1: arcB — interior, strand Y (under at C0, over at C1)
+			// 1: arcB — interior, under-strand stays UNDER at C0 and C1
 			{
 				Polyline: []image.Point{c0, {150, 110}, c1},
 				Start:    Endpoint{Crossing: 0, Over: false},
-				End:      Endpoint{Crossing: 1, Over: true},
+				End:      Endpoint{Crossing: 1, Over: false},
 			},
 			// 2: E1 vOver — C2 → C0, ends over at C0
 			{
@@ -210,16 +211,16 @@ func makeR2Diagram() *Diagram {
 				Start:    Endpoint{Crossing: 3, Over: false},
 				End:      Endpoint{Crossing: 0, Over: false},
 			},
-			// 4: E3 wUnd — C1 → C2, starts under at C1
+			// 4: E3 wOver — C1 → C2, starts over at C1
 			{
 				Polyline: []image.Point{c1, {180, 70}, c2},
-				Start:    Endpoint{Crossing: 1, Over: false},
+				Start:    Endpoint{Crossing: 1, Over: true},
 				End:      Endpoint{Crossing: 2, Over: true},
 			},
-			// 5: E4 wOver — C1 → C3, starts over at C1
+			// 5: E4 wUnd — C1 → C3, starts under at C1
 			{
 				Polyline: []image.Point{c1, {180, 130}, c3},
-				Start:    Endpoint{Crossing: 1, Over: true},
+				Start:    Endpoint{Crossing: 1, Over: false},
 				End:      Endpoint{Crossing: 3, Over: true},
 			},
 			// 6: K2 — self-loop at C2
@@ -294,11 +295,12 @@ func TestApplyR2ProducesCorrectShape(t *testing.T) {
 
 func TestDetectR2WrongOverPattern(t *testing.T) {
 	d := makeR2Diagram()
-	// Break the alternation: make arcA over at both crossings.
-	d.Arcs[0].End.Over = true
+	// Make arcA flip its over flag between C0 and C1 — that's the
+	// trefoil-style "linked" alternating pattern, NOT R2-removable.
+	d.Arcs[0].End.Over = false
 	lasso := lassoSquare(80, 80, 220, 120)
 	if _, ok := detectR2(d, lasso); ok {
-		t.Errorf("detectR2 should not match when alternation is broken")
+		t.Errorf("detectR2 should not match an alternating (linked) bigon")
 	}
 }
 
