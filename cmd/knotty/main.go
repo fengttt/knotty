@@ -253,6 +253,9 @@ func (g *game) buildDrawToolbar() *widget.Container {
 	row.AddChild(iconButton(eraserIcon(), func() {
 		g.imageWidget.Tool = ToolEraser
 	}))
+	row.AddChild(iconButton(moveIcon(), func() {
+		g.imageWidget.Tool = ToolMove
+	}))
 	row.AddChild(g.buildColorCombo())
 	return row
 }
