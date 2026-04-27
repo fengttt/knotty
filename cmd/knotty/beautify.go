@@ -28,17 +28,35 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	}
 
 	bg := newBgraphFromDart(g, len(d.Crossings))
+	// Split every Reidemeister-I self-loop edge (a self-loop whose two
+	// darts are at adjacent CCW positions in adj) by inserting a
+	// degree-2 passthrough vertex on it. Self-loop edges otherwise
+	// break Tutte's 3-connectivity assumption — KnotFolio applies the
+	// same trick in its skeleton extraction.
+	splits := bg.splitSelfLoops(len(d.Arcs))
 	bg0 := bg
 
-	// Track each arc as an alternating sequence of vertex IDs and the dart
-	// connecting consecutive verts. Initially: [startCrossing, endCrossing]
-	// linked by the original dart +(arcID+1).
+	// Track each arc as an alternating sequence of vertex IDs and the
+	// dart connecting consecutive verts. For non-self-loop arcs the
+	// chain has 2 verts and 1 dart; for split self-loops it has 3
+	// verts (start, passthrough, end) and 2 darts (one per sub-edge).
+	splitOf := make(map[int]splitInfo, len(splits))
+	for _, s := range splits {
+		splitOf[s.arcIdx] = s
+	}
 	chains := make([]bchain, len(d.Arcs))
 	for i := range d.Arcs {
-		sd := i + 1
-		chains[i] = bchain{
-			verts: []int{bg.startVert(sd), bg.endVert(sd)},
-			darts: []int{sd},
+		if s, ok := splitOf[i]; ok {
+			chains[i] = bchain{
+				verts: []int{bg.startVert(s.daV), s.pid, bg.endVert(s.dbP)},
+				darts: []int{s.daV, s.dbP},
+			}
+		} else {
+			sd := i + 1
+			chains[i] = bchain{
+				verts: []int{bg.startVert(sd), bg.endVert(sd)},
+				darts: []int{sd},
+			}
 		}
 	}
 
@@ -166,12 +184,14 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	}
 
 	if err := rowReduce(matX); err != nil {
+		dumpBeautifySingular(orig, bg0, cur, outer, "x system", err)
 		return nil, fmt.Errorf("beautify: cannot solve layout — diagram is "+
 			"too simple for Tutte embedding (the underlying graph is not "+
 			"3-connected; try a more complex starting diagram or fewer "+
 			"R1 simplifications). Inner error: %v", err)
 	}
 	if err := rowReduce(matY); err != nil {
+		dumpBeautifySingular(orig, bg0, cur, outer, "y system", err)
 		return nil, fmt.Errorf("beautify: cannot solve layout — diagram is "+
 			"too simple for Tutte embedding. Inner error: %v", err)
 	}
@@ -284,6 +304,83 @@ func newBgraphFromDart(dg *dartGraph, nVerts int) *bgraph {
 		}
 	}
 	return bg
+}
+
+// splitInfo records what happened when a self-loop arc was broken
+// into two sub-edges by inserting a degree-2 passthrough vertex.
+type splitInfo struct {
+	arcIdx int // index in Diagram.Arcs of the split self-loop arc
+	pid    int // bgraph vertex id of the inserted passthrough
+	daV    int // dart at the original vertex pointing to the passthrough
+	dbP    int // dart at the passthrough pointing back to the original vertex
+}
+
+// splitSelfLoops finds every self-loop edge whose two darts at the
+// (single) endpoint vertex are at adjacent CCW positions in adj —
+// the canonical Reidemeister-I kink pattern — and inserts a degree-2
+// passthrough vertex on it. After the pass the bgraph contains no
+// self-loop edges with adjacent CCW darts, which is the precondition
+// the Tutte embedding needs (KnotFolio applies the same trick during
+// its skeleton extraction).
+//
+// Returns one splitInfo per split, keyed by the original arc index
+// in Diagram.Arcs (so the caller can build chains spanning both
+// sub-edges). nArcs limits the original-arc magnitude range; splits
+// can introduce darts of larger magnitude that don't correspond to
+// any Diagram.Arcs entry.
+func (bg *bgraph) splitSelfLoops(nArcs int) []splitInfo {
+	var out []splitInfo
+	nextM := nArcs + 1
+	for d := range bg.dartVert {
+		if a := absi(d); a >= nextM {
+			nextM = a + 1
+		}
+	}
+	for {
+		progressed := false
+		for vid := 0; vid < len(bg.verts); vid++ {
+			adj := bg.verts[vid].darts
+			n := len(adj)
+			for i := 0; i < n; i++ {
+				if adj[i] >= 0 {
+					continue // process each self-loop only from its negative dart
+				}
+				iN := (i + 1) % n
+				iP := (i + n - 1) % n
+				if adj[i] != -adj[iN] && adj[i] != -adj[iP] {
+					continue
+				}
+				oldDart := adj[i]
+				pid := len(bg.verts)
+				bg.verts[vid].darts[i] = -nextM
+				bg.verts = append(bg.verts, bvert{
+					typ:   "p",
+					darts: []int{nextM, oldDart},
+				})
+				bg.dartVert[-nextM] = vid
+				bg.dartVert[nextM] = pid
+				bg.dartVert[oldDart] = pid
+				if arcIdx := absi(oldDart) - 1; arcIdx >= 0 && arcIdx < nArcs {
+					out = append(out, splitInfo{
+						arcIdx: arcIdx,
+						pid:    pid,
+						daV:    -nextM,
+						dbP:    oldDart,
+					})
+				}
+				nextM++
+				progressed = true
+				break
+			}
+			if progressed {
+				break
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
 }
 
 // faceDarts walks the face on the right of d. Returns the cyclic sequence of
@@ -580,6 +677,34 @@ func dumpBeautifyFailure(d *Diagram, bg0 *bgraph, cur *bgraph, outer, badDart in
 		}
 		cur2 = cur.verts[v].darts[(idx+len(cur.verts[v].darts)-1)%len(cur.verts[v].darts)]
 	}
+}
+
+// dumpBeautifySingular logs the input Diagram and bgraph state when
+// the Tutte solve fails because the linear system is singular. Used
+// to investigate non-3-connected graphs (issue #11).
+func dumpBeautifySingular(d *Diagram, bg0 *bgraph, cur *bgraph, outer int, system string, err error) {
+	log.Printf("BFY-SING: %s — %v", system, err)
+	log.Printf("BFY-SING: orig diagram: %d crossings, %d arcs",
+		len(d.Crossings), len(d.Arcs))
+	for i, c := range d.Crossings {
+		log.Printf("BFY-SING:   C%d @ (%d,%d)", i, c.X, c.Y)
+	}
+	for i, a := range d.Arcs {
+		selfLoop := ""
+		if a.Start.Crossing == a.End.Crossing {
+			selfLoop = " SELF-LOOP"
+		}
+		log.Printf("BFY-SING:   A%d C%d(%s)→C%d(%s) %d pts%s",
+			i, a.Start.Crossing, overTag(a.Start.Over),
+			a.End.Crossing, overTag(a.End.Over), len(a.Polyline), selfLoop)
+	}
+	log.Printf("BFY-SING: bg0 (pre-subdiv): %d verts, outer V%d",
+		len(bg0.verts), outer)
+	for i, v := range bg0.verts {
+		log.Printf("BFY-SING:   bg0 V%d typ=%q darts=%v", i, v.typ, v.darts)
+	}
+	log.Printf("BFY-SING: cur (post-subdiv): %d verts (outer V%d, perimeter degree %d)",
+		len(cur.verts), outer, len(cur.verts[outer].darts))
 }
 
 // dumpDiagram logs a Diagram's structure. Invoked from doReidemeister
