@@ -438,54 +438,80 @@ func detectR2(d *Diagram, lasso []image.Point) (r2Hit, bool) {
 	}
 
 	// Find exterior carrier arcs at v and w. We need ONE over-strand
-	// exterior arc and ONE under-strand exterior arc at each crossing.
-	// If either crossing has a self-loop arc as its only exterior
-	// (two endpoints at the same crossing — a kink directly attached
-	// to the bigon), the simple two-strand splice doesn't apply: the
-	// merge must absorb the self-loop polyline into a single arc
-	// instead of producing two separate merged arcs. We bail in that
-	// case until the more complex splice is implemented.
+	// dart and ONE under-strand dart at each crossing. Each
+	// non-bigon arc at v contributes either one dart (its single
+	// endpoint at v with that endpoint's over flag) or — if it's a
+	// self-loop at v — two darts (Start with Start.Over, End with
+	// End.Over). For a clean R1-removable kink at v, those two
+	// flags are different, so a self-loop fills both vOver and vUnd
+	// from the same arc index. applyR2 detects that case
+	// (vOverArc == vUndArc) and does a single-arc merge instead of
+	// the standard two-arc splice.
 	vOver, vUnd, wOver, wUnd := -1, -1, -1, -1
+	consider := func(a Arc, ai, target int, slot func(int, *int) bool) {}
+	_ = consider
+	setSlot := func(slot *int, ai int) bool {
+		if *slot != -1 && *slot != ai {
+			return false
+		}
+		*slot = ai
+		return true
+	}
 	for i, a := range d.Arcs {
 		if i == arcA || i == arcB {
 			continue
 		}
-		if a.Start.Crossing == v && a.End.Crossing == v {
-			return zero, false // self-loop at v as exterior — not yet supported
-		}
-		if a.Start.Crossing == w && a.End.Crossing == w {
-			return zero, false // self-loop at w — not yet supported
-		}
-		if arcEndpointAtCrossing(a, v) >= 0 {
-			over := arcOverAtCrossing(a, v)
-			if over {
-				if vOver != -1 {
+		if a.Start.Crossing == v {
+			if a.Start.Over {
+				if !setSlot(&vOver, i) {
 					return zero, false
 				}
-				vOver = i
 			} else {
-				if vUnd != -1 {
+				if !setSlot(&vUnd, i) {
 					return zero, false
 				}
-				vUnd = i
 			}
 		}
-		if arcEndpointAtCrossing(a, w) >= 0 {
-			over := arcOverAtCrossing(a, w)
-			if over {
-				if wOver != -1 {
+		if a.End.Crossing == v {
+			if a.End.Over {
+				if !setSlot(&vOver, i) {
 					return zero, false
 				}
-				wOver = i
 			} else {
-				if wUnd != -1 {
+				if !setSlot(&vUnd, i) {
 					return zero, false
 				}
-				wUnd = i
+			}
+		}
+		if a.Start.Crossing == w {
+			if a.Start.Over {
+				if !setSlot(&wOver, i) {
+					return zero, false
+				}
+			} else {
+				if !setSlot(&wUnd, i) {
+					return zero, false
+				}
+			}
+		}
+		if a.End.Crossing == w {
+			if a.End.Over {
+				if !setSlot(&wOver, i) {
+					return zero, false
+				}
+			} else {
+				if !setSlot(&wUnd, i) {
+					return zero, false
+				}
 			}
 		}
 	}
 	if vOver < 0 || vUnd < 0 || wOver < 0 || wUnd < 0 {
+		return zero, false
+	}
+	// Both v and w being self-loop carriers at once is too degenerate
+	// to handle cleanly — bail.
+	if vOver == vUnd && wOver == wUnd {
 		return zero, false
 	}
 	return r2Hit{v: v, w: w, arcA: arcA, arcB: arcB,
@@ -500,25 +526,44 @@ func detectR2(d *Diagram, lasso []image.Point) (r2Hit, bool) {
 //
 // In an R2-removable (twist) bigon, each strand keeps the same
 // over/under flag at both crossings — the over-strand stays on top
-// through both, the under-strand stays under at both. So the splice
+// through both, the under-strand stays under at both. The splice
 // pairing is (vOver ↔ wOver) and (vUnd ↔ wUnd).
+//
+// Special case: if one side's exterior is a single self-loop arc
+// (a kink at v or w whose two darts at that crossing fill both the
+// over and under carrier slots), the four-dart pairing collapses to
+// a single merged arc that absorbs the self-loop's polyline as the
+// "bridge" between the two strands.
 func applyR2(d *Diagram, r r2Hit) {
-	merged1 := spliceArcsThroughCrossings(d, r.vOverArc, r.v, r.wOverArc, r.w)
-	merged2 := spliceArcsThroughCrossings(d, r.vUndArc, r.v, r.wUndArc, r.w)
+	wIsSelfLoop := r.wOverArc == r.wUndArc
+	vIsSelfLoop := r.vOverArc == r.vUndArc
 
 	drop := map[int]bool{
 		r.arcA: true, r.arcB: true,
 		r.vOverArc: true, r.vUndArc: true,
 		r.wOverArc: true, r.wUndArc: true,
 	}
-	newArcs := make([]Arc, 0, len(d.Arcs)-len(drop)+2)
+
+	var newR2Arcs []Arc
+	switch {
+	case wIsSelfLoop:
+		newR2Arcs = []Arc{spliceR2WithSelfLoop(d, r, true)}
+	case vIsSelfLoop:
+		newR2Arcs = []Arc{spliceR2WithSelfLoop(d, r, false)}
+	default:
+		merged1 := spliceArcsThroughCrossings(d, r.vOverArc, r.v, r.wOverArc, r.w)
+		merged2 := spliceArcsThroughCrossings(d, r.vUndArc, r.v, r.wUndArc, r.w)
+		newR2Arcs = []Arc{merged1, merged2}
+	}
+
+	newArcs := make([]Arc, 0, len(d.Arcs)-len(drop)+len(newR2Arcs))
 	for i, a := range d.Arcs {
 		if drop[i] {
 			continue
 		}
 		newArcs = append(newArcs, a)
 	}
-	newArcs = append(newArcs, merged1, merged2)
+	newArcs = append(newArcs, newR2Arcs...)
 	d.Arcs = newArcs
 
 	// Drop both crossings; remove the larger index first so the
@@ -535,6 +580,87 @@ func applyR2(d *Diagram, r r2Hit) {
 		fixCrossingRef(&d.Arcs[i].Start.Crossing, lo)
 		fixCrossingRef(&d.Arcs[i].End.Crossing, lo)
 	}
+}
+
+// spliceR2WithSelfLoop produces the single merged arc that replaces
+// the bigon when one side's exterior carrier is a self-loop arc
+// (e.g. a kink directly attached to the bigon at w). The merged arc
+// runs:
+//
+//	(vOver's far end) → through where v was → through where w was
+//	  → through the self-loop's polyline → through where w was again
+//	  → through where v was again → (vUnd's far end)
+//
+// The strand entering via vOver "becomes" the strand exiting via
+// vUnd (they're the same physical strand connected by the self-
+// loop). Polyline gaps at the crossing-removal points get smoothed
+// out by the renderer's Chaikin pass.
+//
+// When wIsSelfLoop is false the same logic runs with v and w swapped.
+func spliceR2WithSelfLoop(d *Diagram, r r2Hit, wIsSelfLoop bool) Arc {
+	var pivot int            // crossing the two non-self-loop carriers attach to
+	var slArc int            // self-loop arc id
+	var leftArc, rightArc int // the two non-self-loop carriers at pivot (over and under)
+	if wIsSelfLoop {
+		pivot = r.v
+		slArc = r.wOverArc
+		leftArc = r.vOverArc
+		rightArc = r.vUndArc
+	} else {
+		pivot = r.w
+		slArc = r.vOverArc
+		leftArc = r.wOverArc
+		rightArc = r.wUndArc
+	}
+
+	a1 := d.Arcs[leftArc]
+	sla := d.Arcs[slArc]
+	a2 := d.Arcs[rightArc]
+
+	// poly1: leftArc's polyline oriented to end at the pivot, with
+	// the pivot vertex itself dropped.
+	var startEP Endpoint
+	var poly1 []image.Point
+	if a1.End.Crossing == pivot {
+		poly1 = a1.Polyline[:len(a1.Polyline)-1]
+		startEP = a1.Start
+	} else {
+		poly1 = reversePolyline(a1.Polyline)
+		poly1 = poly1[:len(poly1)-1]
+		startEP = a1.End
+	}
+
+	// poly2: self-loop's interior, oriented over → under so the
+	// stitched merged arc enters the loop on the over side and
+	// exits on the under side. If sla.Start.Over is true, the
+	// polyline already runs over → under; otherwise reverse it.
+	slPoly := sla.Polyline
+	if !sla.Start.Over {
+		slPoly = reversePolyline(slPoly)
+	}
+	var poly2 []image.Point
+	if len(slPoly) >= 2 {
+		poly2 = slPoly[1 : len(slPoly)-1]
+	}
+
+	// poly3: rightArc's polyline oriented to start at the pivot,
+	// with the pivot vertex itself dropped.
+	var endEP Endpoint
+	var poly3 []image.Point
+	if a2.Start.Crossing == pivot {
+		poly3 = a2.Polyline[1:]
+		endEP = a2.End
+	} else {
+		poly3 = reversePolyline(a2.Polyline)
+		poly3 = poly3[1:]
+		endEP = a2.Start
+	}
+
+	poly := make([]image.Point, 0, len(poly1)+len(poly2)+len(poly3))
+	poly = append(poly, poly1...)
+	poly = append(poly, poly2...)
+	poly = append(poly, poly3...)
+	return Arc{Polyline: poly, Start: startEP, End: endEP}
 }
 
 // spliceArcsThroughCrossings merges two arcs into one by removing
