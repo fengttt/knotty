@@ -20,7 +20,23 @@ import (
 func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 	orig := d
 	if len(d.Crossings) == 0 {
-		return d, nil
+		// No crossings means the diagram is just a collection of
+		// free-floating closed curves (unknot components). Replace
+		// each Loop with a clean circle inscribed in the loop's
+		// current bounding box — that's what "beautify the unknot"
+		// should do.
+		if len(d.Loops) == 0 {
+			return d, nil
+		}
+		out := &Diagram{
+			Crossings: nil,
+			Arcs:      nil,
+			Loops:     make([][]image.Point, len(d.Loops)),
+		}
+		for i, lp := range d.Loops {
+			out.Loops[i] = circleFitLoop(lp)
+		}
+		return out, nil
 	}
 	g, err := newDartGraph(d)
 	if err != nil {
@@ -255,10 +271,12 @@ func (d *Diagram) Beautify(canvasW, canvasH int) (*Diagram, error) {
 		return image.Point{X: int(math.Round(x)), Y: int(math.Round(y))}
 	}
 
-	// Assemble the new Diagram.
+	// Assemble the new Diagram. Loops are pass-through — Beautify is
+	// only redoing the Tutte layout for the crossing-bearing part.
 	out := &Diagram{
 		Crossings: make([]image.Point, len(d.Crossings)),
 		Arcs:      make([]Arc, len(d.Arcs)),
+		Loops:     append([][]image.Point(nil), d.Loops...),
 	}
 	for v := range d.Crossings {
 		out.Crossings[v] = toCanvas(v)
@@ -304,6 +322,54 @@ func newBgraphFromDart(dg *dartGraph, nVerts int) *bgraph {
 		}
 	}
 	return bg
+}
+
+// circleFitLoop returns a closed-circle polyline inscribed in the
+// bounding box of poly, centered at the bbox centroid. Used by
+// Beautify on 0-crossing diagrams to replace hand-drawn or post-R1
+// loops with a clean circle.
+func circleFitLoop(poly []image.Point) []image.Point {
+	if len(poly) == 0 {
+		return nil
+	}
+	minX, minY := poly[0].X, poly[0].Y
+	maxX, maxY := poly[0].X, poly[0].Y
+	for _, p := range poly[1:] {
+		if p.X < minX {
+			minX = p.X
+		}
+		if p.X > maxX {
+			maxX = p.X
+		}
+		if p.Y < minY {
+			minY = p.Y
+		}
+		if p.Y > maxY {
+			maxY = p.Y
+		}
+	}
+	w := maxX - minX
+	h := maxY - minY
+	radius := w
+	if h < radius {
+		radius = h
+	}
+	radius /= 2
+	if radius < 4 {
+		radius = 4
+	}
+	cx := (minX + maxX) / 2
+	cy := (minY + maxY) / 2
+	const N = 32
+	out := make([]image.Point, N)
+	for i := 0; i < N; i++ {
+		theta := 2 * math.Pi * float64(i) / float64(N)
+		out[i] = image.Point{
+			X: cx + int(math.Round(float64(radius)*math.Cos(theta))),
+			Y: cy + int(math.Round(float64(radius)*math.Sin(theta))),
+		}
+	}
+	return out
 }
 
 // splitInfo records what happened when a self-loop arc was broken

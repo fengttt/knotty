@@ -30,6 +30,17 @@ func renderDiagram(canvas *ebiten.Image, d *Diagram, bg color.Color) {
 		poly := trimPolylineEnds(smooth, !a.Start.Over, !a.End.Over, gapPx)
 		strokeSmoothPolyline(canvas, poly, strokeW, stroke)
 	}
+	// Free-floating loops (no crossings, no over/under). Smooth as
+	// closed curves: append the first point at the end so Chaikin
+	// rounds the seam, then drop it for stroking.
+	for _, lp := range d.Loops {
+		if len(lp) < 2 {
+			continue
+		}
+		closed := append(append([]image.Point(nil), lp...), lp[0])
+		smooth := smoothChaikin(closed, chaikinIters)
+		strokeSmoothPolyline(canvas, smooth, strokeW, stroke)
+	}
 }
 
 // resamplePolylineUniform returns a polyline with exactly n points sampled

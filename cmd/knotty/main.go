@@ -730,12 +730,84 @@ func (g *game) attachDiagramFromCanvas() {
 	}
 	d, err := convertImage(raster)
 	if err != nil {
-		log.Printf("attach diagram: %v", err)
+		log.Printf("attachDiagramFromCanvas: convert failed: %v", err)
 		g.imageWidget.Diagram = nil
 		return
 	}
 	resampleDiagramArcs(d, attachedArcPoints)
+	log.Printf("attachDiagramFromCanvas: %d crossings, %d arcs", len(d.Crossings), len(d.Arcs))
 	g.imageWidget.Diagram = d
+}
+
+// fitCircleToCanvas scans the raster for non-background pixels, and if
+// it finds any, returns a closed-circle polyline inscribed in the
+// dark pixels' bounding box. Used as a "the user drew an unknot loop
+// but convertImage didn't pick up any crossings" fallback so Beautify
+// can produce a clean circle even though the convert pipeline
+// doesn't currently detect free-floating closed curves.
+//
+// Returns nil if the canvas has no recognisable dark content or the
+// bounding box is too small for a meaningful circle.
+func fitCircleToCanvas(raster *stdimage.RGBA, bg color.Color) []stdimage.Point {
+	if raster == nil {
+		return nil
+	}
+	br, bgg, bb, _ := bg.RGBA()
+	const threshold = 0x6000
+	b := raster.Bounds()
+	minX, minY := b.Max.X, b.Max.Y
+	maxX, maxY := b.Min.X, b.Min.Y
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := raster.At(x, y).RGBA()
+			d := absDiff32(r, br) + absDiff32(g, bgg) + absDiff32(bl, bb)
+			if d > threshold {
+				if x < minX {
+					minX = x
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if y > maxY {
+					maxY = y
+				}
+			}
+		}
+	}
+	if maxX < minX || maxY < minY {
+		return nil
+	}
+	w := maxX - minX
+	h := maxY - minY
+	radius := w
+	if h < radius {
+		radius = h
+	}
+	radius /= 2
+	if radius < 8 {
+		return nil
+	}
+	cx := (minX + maxX) / 2
+	cy := (minY + maxY) / 2
+	const N = 32
+	out := make([]stdimage.Point, N)
+	for i := 0; i < N; i++ {
+		theta := 2 * math.Pi * float64(i) / float64(N)
+		x := cx + int(math.Round(float64(radius)*math.Cos(theta)))
+		y := cy + int(math.Round(float64(radius)*math.Sin(theta)))
+		out[i] = stdimage.Point{X: x, Y: y}
+	}
+	return out
+}
+
+func absDiff32(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // attachedArcPoints is the number of polyline points each arc is
@@ -909,31 +981,68 @@ func (g *game) doConvert() {
 	g.propsArea.SetText(b.String())
 }
 
-// doBeautify takes a snapshot of the current canvas, runs the convert
-// pipeline to recover a Diagram, runs the Tutte-embedding beautifier,
-// and rasterises the result back onto the canvas. The pre-beautify
-// pixels are saved into undoSnap so doUndo can restore them.
+// doBeautify runs the Tutte-embedding beautifier and rasterises the
+// result back onto the canvas. If a Diagram is already attached
+// (post-Search/Convert/R-move), use it directly so that side data
+// like free-floating Loops survives. Otherwise fall back to running
+// convertImage on the canvas pixels — the standard path when the
+// user has hand-drawn something. The pre-beautify pixels are saved
+// into undoSnap so doUndo can restore them.
 func (g *game) doBeautify() {
-	raster := g.canvasToImage()
-	if raster == nil {
-		g.propsArea.SetText("beautify: no canvas\n")
-		return
-	}
-	d, err := convertImage(raster)
-	if err != nil {
-		g.propsArea.SetText(fmt.Sprintf("beautify: convert failed: %v\n", err))
-		return
-	}
 	canvas := g.imageWidget.Image
 	if canvas == nil {
 		g.propsArea.SetText("beautify: no canvas image\n")
 		return
+	}
+	var d *Diagram
+	if attached := g.imageWidget.Diagram; attached != nil {
+		log.Printf("doBeautify: using attached Diagram, %d crossings, %d arcs, %d loops",
+			len(attached.Crossings), len(attached.Arcs), len(attached.Loops))
+		// Deep-copy enough to safely mutate.
+		d = &Diagram{
+			Crossings: append([]stdimage.Point(nil), attached.Crossings...),
+			Arcs:      append([]Arc(nil), attached.Arcs...),
+			Loops:     append([][]stdimage.Point(nil), attached.Loops...),
+		}
+	} else {
+		raster := g.canvasToImage()
+		if raster == nil {
+			g.propsArea.SetText("beautify: no canvas\n")
+			return
+		}
+		converted, err := convertImage(raster)
+		if err != nil {
+			g.propsArea.SetText(fmt.Sprintf("beautify: convert failed: %v\n", err))
+			return
+		}
+		log.Printf("doBeautify: convertImage produced %d crossings, %d arcs",
+			len(converted.Crossings), len(converted.Arcs))
+		// convertImage doesn't currently detect free-floating closed
+		// curves. If it returned nothing, fall back to fitting a
+		// circle to the bounding box of any dark pixels on the
+		// canvas — that makes "draw an unknot, click Beautify" do
+		// the natural thing (replace the drawing with a clean
+		// circle).
+		if len(converted.Crossings) == 0 && len(converted.Arcs) == 0 {
+			if loop := fitCircleToCanvas(raster, canvasBG); loop != nil {
+				converted.Loops = append(converted.Loops, loop)
+			}
+		}
+		d = converted
 	}
 	g.snapshotCanvas()
 	cb := canvas.Bounds()
 	bd, err := d.Beautify(cb.Dx(), cb.Dy())
 	if err != nil {
 		g.propsArea.SetText(fmt.Sprintf("beautify: %v\n", err))
+		return
+	}
+	if len(bd.Crossings) == 0 && len(bd.Arcs) == 0 && len(bd.Loops) == 0 {
+		// Nothing to draw — convertImage didn't pick up any structure
+		// (typical when the canvas has only a free-floating closed
+		// curve, which the convert pipeline can't currently detect).
+		// Don't clear the canvas in that case.
+		g.propsArea.SetText("beautify: nothing to lay out (canvas left as-is)\n")
 		return
 	}
 	renderDiagram(canvas, bd, canvasBG)

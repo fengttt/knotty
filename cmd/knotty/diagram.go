@@ -20,8 +20,12 @@ type Arc struct {
 
 // Diagram is the polyline-level knot diagram extracted from a raster image
 // by convertImage. Crossings are 4-valent vertices in pixel coordinates;
-// Arcs connect them.
+// Arcs connect them. Loops carries free-floating closed curves (no
+// crossings, no endpoints) — the way the unknot drawn as a plain
+// circle is represented after R1 simplification removes a diagram's
+// last crossing. Each loop is a closed polyline in pixel coords.
 type Diagram struct {
 	Crossings []image.Point
 	Arcs      []Arc
+	Loops     [][]image.Point
 }

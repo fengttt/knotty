@@ -202,6 +202,12 @@ type r1Hit struct {
 	loop     int
 	carrier1 int // non-loop arc whose endpoint at v has Over = !L.End.Over (matches L.Start.Over)
 	carrier2 int // non-loop arc whose endpoint at v has Over = !L.Start.Over (matches L.End.Over)
+	// carrierIsSelfLoop is true when carrier1 == carrier2 — the only
+	// non-loop arc at v is itself a self-loop (the diagram is the
+	// terminal "1 crossing + 2 self-loops" unknot rendering). The
+	// rewrite drops the crossing and BOTH self-loop arcs, promoting
+	// the carrier's polyline to a free-floating Loop.
+	carrierIsSelfLoop bool
 }
 
 // detectR1 returns an r1Hit if the lasso encloses exactly one crossing
@@ -284,9 +290,10 @@ func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 			}
 		}
 	}
-	if overEnd < 0 || undEnd < 0 || overEnd == undEnd {
+	if overEnd < 0 || undEnd < 0 {
 		return zero, false
 	}
+	selfLoopCarrier := overEnd == undEnd
 	// Pair the carriers with the loop's same-over-flag endpoints. The
 	// loop's start has flag X; carrier whose v-endpoint is X is the
 	// "before-the-kink" side (carrier1). carrier2 mirrors that with
@@ -295,7 +302,13 @@ func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 	if !d.Arcs[loop].Start.Over {
 		c1, c2 = undEnd, overEnd
 	}
-	return r1Hit{crossing: v, loop: loop, carrier1: c1, carrier2: c2}, true
+	return r1Hit{
+		crossing:          v,
+		loop:              loop,
+		carrier1:          c1,
+		carrier2:          c2,
+		carrierIsSelfLoop: selfLoopCarrier,
+	}, true
 }
 
 // applyR1 performs the kink-removal rewrite: drops the crossing and
@@ -303,7 +316,37 @@ func detectR1(d *Diagram, lasso []image.Point) (r1Hit, bool) {
 // arc that bypasses where the crossing used to be. d is mutated in
 // place; arc indices and crossing indices in the resulting Diagram
 // are renumbered so they remain contiguous.
+//
+// Special case: when the carrier itself is a self-loop (the only
+// non-loop arc at v has both endpoints there too — the terminal
+// "1 crossing + 2 self-loops" unknot rendering), the rewrite drops
+// the crossing and BOTH self-loop arcs and promotes the carrier's
+// polyline (closed at v) into Diagram.Loops as a free-floating
+// closed curve.
 func applyR1(d *Diagram, r r1Hit) {
+	if r.carrierIsSelfLoop {
+		// Promote the carrier's polyline into a loop. Both endpoints
+		// were at the (now-removed) crossing, so the polyline is
+		// already closed.
+		carrierPoly := append([]image.Point(nil), d.Arcs[r.carrier1].Polyline...)
+		drop := map[int]bool{r.loop: true, r.carrier1: true}
+		newArcs := make([]Arc, 0, len(d.Arcs)-len(drop))
+		for i, a := range d.Arcs {
+			if drop[i] {
+				continue
+			}
+			newArcs = append(newArcs, a)
+		}
+		d.Arcs = newArcs
+		d.Loops = append(d.Loops, carrierPoly)
+		d.Crossings = append(d.Crossings[:r.crossing], d.Crossings[r.crossing+1:]...)
+		for i := range d.Arcs {
+			fixCrossingRef(&d.Arcs[i].Start.Crossing, r.crossing)
+			fixCrossingRef(&d.Arcs[i].End.Crossing, r.crossing)
+		}
+		return
+	}
+
 	merged := spliceArcsThroughCrossings(d, r.carrier1, r.crossing, r.carrier2, r.crossing)
 
 	drop := map[int]bool{r.loop: true, r.carrier1: true, r.carrier2: true}
