@@ -276,6 +276,9 @@ func (g *game) buildDrawToolbar() *widget.Container {
 		g.imageWidget.Tool = ToolReidemeister
 		g.imageWidget.CancelLasso()
 	}))
+	row.AddChild(iconButton(switchIcon(), func() {
+		g.imageWidget.Tool = ToolSwitch
+	}))
 	row.AddChild(iconButton(okIcon(), func() {
 		closed := g.imageWidget.CommitLasso()
 		if closed == nil {

@@ -40,6 +40,11 @@ const (
 	// Reidemeister move on the underlying Diagram. While the user is
 	// dragging, the lasso path is overlayed on the canvas.
 	ToolReidemeister = 3
+	// ToolSwitch listens for a single click on (or near) a crossing
+	// and flips that crossing's over/under at every dart there. The
+	// host re-renders the canvas via OnDiagramChanged so the visible
+	// over/under reads the new way around.
+	ToolSwitch = 4
 )
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
@@ -93,6 +98,12 @@ type scaledImage struct {
 	// drag and replaces any pending lasso.
 	lassoPath    []image.Point
 	lassoPressed bool
+
+	// switchPressed tracks the press state for ToolSwitch so we can
+	// fire the over/under flip exactly once per click (on the
+	// not-pressed → pressed transition) rather than every frame the
+	// pointer is held.
+	switchPressed bool
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -211,14 +222,22 @@ func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 	case ToolMove:
 		s.drawing = false
 		s.lassoReset()
+		s.switchPressed = false
 		s.handleDragging()
 	case ToolReidemeister:
 		s.drawing = false
 		s.drag.reset()
+		s.switchPressed = false
 		s.handleLasso()
+	case ToolSwitch:
+		s.drawing = false
+		s.drag.reset()
+		s.lassoReset()
+		s.handleSwitch()
 	default:
 		s.drag.reset()
 		s.lassoReset()
+		s.switchPressed = false
 		s.handleDrawing()
 	}
 }
@@ -308,6 +327,77 @@ func (s *scaledImage) handleLasso() {
 		return
 	}
 	s.lassoPath = nil
+}
+
+// handleSwitch fires once on each not-pressed → pressed transition
+// while ToolSwitch is active. On click it locates the nearest
+// crossing in s.Diagram within a small pixel radius and flips the
+// over flag of every dart at that crossing. Calls OnDiagramChanged
+// so the host can redraw with the new over/under reading. No-ops
+// when there's no Diagram or the click missed every crossing.
+func (s *scaledImage) handleSwitch() {
+	if s.Image == nil || s.Diagram == nil {
+		return
+	}
+	mx, my, pressed, _ := primaryPointer()
+	if !pressed {
+		s.switchPressed = false
+		return
+	}
+	if s.switchPressed {
+		return
+	}
+	s.switchPressed = true
+
+	ib := s.Image.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
+	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
+		return
+	}
+	sx := float64(rw) / float64(iw)
+	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
+	px := (mx - ox) / scale
+	py := (my - oy) / scale
+	if px < 0 || py < 0 || px >= float64(iw) || py >= float64(ih) {
+		return
+	}
+
+	const hitRadius = 24.0
+	bestDist := hitRadius * hitRadius
+	nearest := -1
+	for i, c := range s.Diagram.Crossings {
+		ddx := float64(c.X) - px
+		ddy := float64(c.Y) - py
+		d := ddx*ddx + ddy*ddy
+		if d < bestDist {
+			bestDist = d
+			nearest = i
+		}
+	}
+	if nearest < 0 {
+		return
+	}
+	for i := range s.Diagram.Arcs {
+		a := &s.Diagram.Arcs[i]
+		if a.Start.Crossing == nearest {
+			a.Start.Over = !a.Start.Over
+		}
+		if a.End.Crossing == nearest {
+			a.End.Over = !a.End.Over
+		}
+	}
+	if s.OnDiagramChanged != nil {
+		s.OnDiagramChanged()
+	}
 }
 
 // CommitLasso returns the pending closed lasso polygon (last point ==

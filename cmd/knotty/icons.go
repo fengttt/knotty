@@ -99,6 +99,23 @@ func saveIcon() *ebiten.Image {
 	return glyphIconFace(materialFace, "", color.NRGBA{0xa0, 0xe0, 0xa0, 0xff})
 }
 
+// switchIcon draws two opposing horizontal arrows (↔) inside a 24×24
+// image — the toolbar glyph for the over/under-flip tool.
+func switchIcon() *ebiten.Image {
+	img := ebiten.NewImage(iconSize, iconSize)
+	c := color.NRGBA{0xff, 0xa0, 0xe0, 0xff}
+	const stroke = float32(2)
+	// Top arrow: pointing right.
+	vector.StrokeLine(img, 4, 9, 19, 9, stroke, c, true)
+	vector.StrokeLine(img, 16, 6, 19, 9, stroke, c, true)
+	vector.StrokeLine(img, 16, 12, 19, 9, stroke, c, true)
+	// Bottom arrow: pointing left.
+	vector.StrokeLine(img, 5, 16, 20, 16, stroke, c, true)
+	vector.StrokeLine(img, 8, 13, 5, 16, stroke, c, true)
+	vector.StrokeLine(img, 8, 19, 5, 16, stroke, c, true)
+	return img
+}
+
 // okIcon draws a green checkmark inside a 24×24 image. Used as the
 // "commit pending lasso" button paired with the Reidemeister tool.
 func okIcon() *ebiten.Image {
