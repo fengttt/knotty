@@ -110,6 +110,12 @@ type game struct {
 	// try to convert the canvas synchronously.
 	pendingAttach bool
 
+	// debugLassoArmed makes the next lasso fire the debug-overlay
+	// path (showing inside crossings, S-points, the movable strand
+	// and C_a' / C_b') instead of applying an R-move. Toggled by
+	// the "Debug Lasso" button.
+	debugLassoArmed bool
+
 	face     etext.Face
 	hugeFace etext.Face
 }
@@ -240,6 +246,16 @@ func (g *game) buildTopPane() *widget.Container {
 		}
 		renderDiagram(g.imageWidget.Image, g.imageWidget.Diagram, canvasBG)
 	}
+	g.imageWidget.OnLasso = func(closed []stdimage.Point) {
+		// "Debug Lasso" mode: the next lasso shows debug info
+		// instead of applying an R-move.
+		if g.debugLassoArmed {
+			g.debugLassoArmed = false
+			g.runDebugLasso(closed)
+			return
+		}
+		g.doReidemeister(closed)
+	}
 	top.AddChild(g.imageWidget)
 	return top
 }
@@ -271,20 +287,10 @@ func (g *game) buildDrawToolbar() *widget.Container {
 		g.imageWidget.Tool = ToolMove
 	}))
 	row.AddChild(iconButton(reidemeisterIcon(), func() {
-		// Re-clicking the lasso tool clears any pending curve so the
-		// user can either start fresh or back out without committing.
 		g.imageWidget.Tool = ToolReidemeister
-		g.imageWidget.CancelLasso()
 	}))
 	row.AddChild(iconButton(switchIcon(), func() {
 		g.imageWidget.Tool = ToolSwitch
-	}))
-	row.AddChild(iconButton(okIcon(), func() {
-		closed := g.imageWidget.CommitLasso()
-		if closed == nil {
-			return
-		}
-		g.doReidemeister(closed)
 	}))
 	row.AddChild(g.buildColorCombo())
 	return row
@@ -992,28 +998,38 @@ func (g *game) canvasToImage() *stdimage.RGBA {
 	}
 }
 
-// doDebugLasso toggles the lasso-debug overlay. With a pending lasso
-// (drawn with the lasso tool but not yet committed via OK), the first
-// click marks every Diagram crossing inside the lasso with a red
-// circle labelled by its Diagram index, marks every arc/lasso
-// boundary intersection with a red circle labelled S1, S2, ... in
-// arc/path order, and (when the R3 detector accepts the lasso) draws
-// the movable strand as a blue polyline overlay. The full debug
-// breakdown is also dumped to the log. A second click clears
-// everything.
+// doDebugLasso is the toolbar Debug Lasso button click handler. If a
+// debug overlay is currently displayed (or debug mode is armed), it
+// clears them. Otherwise it arms debug-lasso mode AND switches to
+// the lasso tool — the next lasso the user draws will route through
+// runDebugLasso (showing inside crossings, S-points, the movable
+// strand and C_a' / C_b') instead of applying an R-move.
 func (g *game) doDebugLasso() {
 	if g.imageWidget == nil {
 		return
 	}
-	if len(g.imageWidget.DebugLassoMarks) > 0 || len(g.imageWidget.DebugLassoStrand) > 0 {
+	if g.debugLassoArmed ||
+		len(g.imageWidget.DebugLassoMarks) > 0 ||
+		len(g.imageWidget.DebugLassoStrand) > 0 {
+		g.debugLassoArmed = false
 		g.imageWidget.DebugLassoMarks = nil
 		g.imageWidget.DebugLassoStrand = nil
+		g.propsArea.SetText("debug lasso disarmed\n")
 		return
 	}
-	lasso := g.imageWidget.PendingLasso()
-	if lasso == nil {
-		log.Printf("debug lasso: no pending lasso")
-		g.propsArea.SetText("debug lasso: draw a lasso first\n")
+	g.debugLassoArmed = true
+	g.imageWidget.Tool = ToolReidemeister
+	g.propsArea.SetText("debug lasso armed — draw a lasso to inspect (no R-move)\n")
+}
+
+// runDebugLasso paints the diagnostic overlay for `lasso` (treated
+// as the closed polygon the user just released): inside-lasso
+// crossings labelled C<i>, lasso-boundary intersections labelled
+// S1, S2, ..., and (when detectR3 accepts) the movable strand
+// drawn in blue plus C_a' / C_b' marks. With no Diagram attached,
+// dumps a 2×2-sampled ASCII map of the lasso bbox to the log.
+func (g *game) runDebugLasso(lasso []stdimage.Point) {
+	if g.imageWidget == nil || len(lasso) < 4 {
 		return
 	}
 	d := g.imageWidget.Diagram

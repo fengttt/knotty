@@ -89,15 +89,19 @@ type scaledImage struct {
 	drag dragState
 
 	// lassoPath is the cursor path collected during a ToolReidemeister
-	// drag. Coordinates are in source-image (canvas) pixels. While the
-	// pointer is pressed, lassoPressed is true and the path tracks the
-	// in-progress drag. On release with at least 3 points, the first
-	// point is appended to close the polygon and lassoPressed flips to
-	// false — the path then persists as a "pending" lasso awaiting
-	// CommitLasso (OK) or CancelLasso. Pressing again starts a fresh
-	// drag and replaces any pending lasso.
+	// drag. Coordinates are in source-image (canvas) pixels. On
+	// release with at least 3 points the path is auto-closed and
+	// passed to OnLasso, then cleared. There is no "pending" lasso
+	// state — every lasso fires immediately.
 	lassoPath    []image.Point
 	lassoPressed bool
+
+	// OnLasso is invoked with the auto-closed lasso polygon (last
+	// point == first point, in source-image pixel coordinates) once
+	// the pointer is released after a ToolReidemeister drag with
+	// ≥ 3 collected points. nil disables the tool's effect (the
+	// overlay still draws while the pointer is held).
+	OnLasso func(closed []image.Point)
 
 	// switchPressed tracks the press state for ToolSwitch so we can
 	// fire the over/under flip exactly once per click (on the
@@ -317,14 +321,11 @@ func (s *scaledImage) handleLasso() {
 		return
 	}
 	s.lassoPressed = false
-	if len(s.lassoPath) >= 3 {
-		// Auto-close in place: append the first point so the polygon
-		// reads as closed both visually (render loop draws the closing
-		// segment) and for the host's point-in-polygon tests. Path
-		// stays in lassoPath as a "pending" lasso until CommitLasso or
-		// CancelLasso.
-		s.lassoPath = append(s.lassoPath, s.lassoPath[0])
-		return
+	if len(s.lassoPath) >= 3 && s.OnLasso != nil {
+		closed := make([]image.Point, len(s.lassoPath)+1)
+		copy(closed, s.lassoPath)
+		closed[len(s.lassoPath)] = s.lassoPath[0]
+		s.OnLasso(closed)
 	}
 	s.lassoPath = nil
 }
@@ -400,34 +401,6 @@ func (s *scaledImage) handleSwitch() {
 	}
 }
 
-// CommitLasso returns the pending closed lasso polygon (last point ==
-// first point, in source-image pixel coordinates) and clears it.
-// Returns nil if no lasso is pending or one is still being drawn.
-func (s *scaledImage) CommitLasso() []image.Point {
-	if s.lassoPressed || len(s.lassoPath) < 4 {
-		return nil
-	}
-	closed := append([]image.Point(nil), s.lassoPath...)
-	s.lassoPath = nil
-	return closed
-}
-
-// PendingLasso returns a copy of the pending closed lasso polygon
-// without clearing it. Returns nil if no lasso is pending. Used by
-// non-destructive consumers (e.g. the Debug Lasso overlay).
-func (s *scaledImage) PendingLasso() []image.Point {
-	if s.lassoPressed || len(s.lassoPath) < 4 {
-		return nil
-	}
-	return append([]image.Point(nil), s.lassoPath...)
-}
-
-// CancelLasso clears any pending or in-progress lasso polygon so the
-// overlay disappears. Safe to call when there is no lasso.
-func (s *scaledImage) CancelLasso() {
-	s.lassoPath = nil
-	s.lassoPressed = false
-}
 
 // handleDragging routes pointer input into the drag state machine.
 // Only called when Tool == ToolMove, so it doesn't need to coexist
