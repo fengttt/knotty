@@ -54,3 +54,6 @@ dataset/knot_polys.xlsx
 # Build artifacts
 /knotty
 /_site
+
+# User-saved hand-drawn diagrams (runtime data)
+/saved/

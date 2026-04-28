@@ -22,10 +22,10 @@ const iconSize = 24
 //go:embed NotoSansSymbols2-Regular.ttf
 var notoSymbolsTTF []byte
 
-// materialSymbolsTTF is a 4-glyph subset of Material Symbols Outlined
+// materialSymbolsTTF is a 5-glyph subset of Material Symbols Outlined
 // (Apache 2.0). It supplies U+E155 (gesture, used as the Reidemeister-
-// move tool icon), U+E166 (undo), U+E65F (auto_awesome, used for
-// Beautify), and U+E6D0 (ink_eraser).
+// move tool icon), U+E161 (save), U+E166 (undo), U+E65F (auto_awesome,
+// used for Beautify), and U+E6D0 (ink_eraser).
 //
 //go:embed MaterialSymbols-subset.ttf
 var materialSymbolsTTF []byte
@@ -91,6 +91,23 @@ func undoIcon() *ebiten.Image {
 // pale lavender as the Reidemeister-move (lasso) tool icon.
 func reidemeisterIcon() *ebiten.Image {
 	return glyphIconFace(materialFace, "", color.NRGBA{0xc8, 0xb0, 0xff, 0xff})
+}
+
+// saveIcon renders U+E161 (Material Symbols "save") in soft
+// green as the Save trigger.
+func saveIcon() *ebiten.Image {
+	return glyphIconFace(materialFace, "", color.NRGBA{0xa0, 0xe0, 0xa0, 0xff})
+}
+
+// okIcon draws a green checkmark inside a 24×24 image. Used as the
+// "commit pending lasso" button paired with the Reidemeister tool.
+func okIcon() *ebiten.Image {
+	img := ebiten.NewImage(iconSize, iconSize)
+	c := color.NRGBA{0x80, 0xff, 0x80, 0xff}
+	const stroke = float32(2.5)
+	vector.StrokeLine(img, 5, 12, 10, 18, stroke, c, true)
+	vector.StrokeLine(img, 10, 18, 19, 7, stroke, c, true)
+	return img
 }
 
 // moveIcon draws a four-headed arrow (the standard "move" cursor

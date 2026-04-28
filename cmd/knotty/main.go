@@ -13,8 +13,11 @@ import (
 	"fmt"
 	stdimage "image"
 	"image/color"
+	"image/png"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -237,9 +240,6 @@ func (g *game) buildTopPane() *widget.Container {
 		}
 		renderDiagram(g.imageWidget.Image, g.imageWidget.Diagram, canvasBG)
 	}
-	g.imageWidget.OnLasso = func(closed []stdimage.Point) {
-		g.doReidemeister(closed)
-	}
 	top.AddChild(g.imageWidget)
 	return top
 }
@@ -271,7 +271,17 @@ func (g *game) buildDrawToolbar() *widget.Container {
 		g.imageWidget.Tool = ToolMove
 	}))
 	row.AddChild(iconButton(reidemeisterIcon(), func() {
+		// Re-clicking the lasso tool clears any pending curve so the
+		// user can either start fresh or back out without committing.
 		g.imageWidget.Tool = ToolReidemeister
+		g.imageWidget.CancelLasso()
+	}))
+	row.AddChild(iconButton(okIcon(), func() {
+		closed := g.imageWidget.CommitLasso()
+		if closed == nil {
+			return
+		}
+		g.doReidemeister(closed)
 	}))
 	row.AddChild(g.buildColorCombo())
 	return row
@@ -442,10 +452,21 @@ func (g *game) buildStyleCombo() *widget.ListComboButton {
 	return combo
 }
 
-// buildSearchRow builds the top row of the right pane: knot-name input,
-// Search button, and Refresh button (side by side).
+// buildSearchRow builds the bottom controls — two stacked horizontal
+// rows. Row 1 (search): knot-name input, Search, Save (icon), and the
+// style combo. Row 2 (canvas actions): Convert and Debug.
 func (g *game) buildSearchRow() *widget.Container {
-	row := widget.NewContainer(
+	outer := widget.NewContainer(
+		widget.ContainerOpts.Layout(widget.NewRowLayout(
+			widget.RowLayoutOpts.Direction(widget.DirectionVertical),
+			widget.RowLayoutOpts.Spacing(6),
+		)),
+	)
+
+	row1 := widget.NewContainer(
+		widget.ContainerOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Stretch: true}),
+		),
 		widget.ContainerOpts.Layout(widget.NewRowLayout(
 			widget.RowLayoutOpts.Direction(widget.DirectionHorizontal),
 			widget.RowLayoutOpts.Spacing(6),
@@ -477,7 +498,7 @@ func (g *game) buildSearchRow() *widget.Container {
 			g.doSearch(args.InputText)
 		}),
 	)
-	row.AddChild(g.input)
+	row1.AddChild(g.input)
 
 	searchBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
@@ -491,7 +512,25 @@ func (g *game) buildSearchRow() *widget.Container {
 			g.doSearch(g.input.GetText())
 		}),
 	)
-	row.AddChild(searchBtn)
+	row1.AddChild(searchBtn)
+
+	row1.AddChild(iconButton(saveIcon(), func() {
+		g.doSave()
+	}))
+
+	row1.AddChild(g.buildStyleCombo())
+
+	outer.AddChild(row1)
+
+	row2 := widget.NewContainer(
+		widget.ContainerOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Stretch: true}),
+		),
+		widget.ContainerOpts.Layout(widget.NewRowLayout(
+			widget.RowLayoutOpts.Direction(widget.DirectionHorizontal),
+			widget.RowLayoutOpts.Spacing(6),
+		)),
+	)
 
 	convertBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
@@ -505,7 +544,7 @@ func (g *game) buildSearchRow() *widget.Container {
 			g.doConvert()
 		}),
 	)
-	row.AddChild(convertBtn)
+	row2.AddChild(convertBtn)
 
 	debugBtn := widget.NewButton(
 		widget.ButtonOpts.WidgetOpts(
@@ -519,11 +558,11 @@ func (g *game) buildSearchRow() *widget.Container {
 			g.doDebug()
 		}),
 	)
-	row.AddChild(debugBtn)
+	row2.AddChild(debugBtn)
 
-	row.AddChild(g.buildStyleCombo())
+	outer.AddChild(row2)
 
-	return row
+	return outer
 }
 
 func (g *game) buildBottomPane() *widget.Container {
@@ -585,15 +624,99 @@ func (g *game) buildBottomPane() *widget.Container {
 
 // doSearch handles the search button / Enter key. An empty query
 // clears the image, properties, and search box, and labels the name
-// as "Drawing" — a blank canvas state. Non-empty queries look up the
-// KnotInfo row by name.
+// as "Drawing" — a blank canvas state. Non-empty queries route by
+// first character: a digit (e.g. "3_1", "4_1") looks up the
+// KnotInfo row by name; a letter looks up a user-saved diagram in
+// the saved/ directory by file name (saved/<name>.png).
 func (g *game) doSearch(q string) {
 	q = trim(q)
 	if q == "" {
 		g.enterDrawingMode()
 		return
 	}
+	if len(q) > 0 && isLetter(q[0]) {
+		g.loadSavedKnot(q)
+		return
+	}
 	g.loadKnot(q)
+}
+
+func isLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// loadSavedKnot loads a previously-saved diagram from
+// saved/<name>.png, blits it onto the canvas, and triggers the same
+// pendingAttach flow as a knot_info load so Move and the
+// Reidemeister tool can run on it.
+func (g *game) loadSavedKnot(name string) {
+	path := savedKnotPath(name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		g.nameLabel.Label = name + " (not saved)"
+		g.propsArea.SetText(fmt.Sprintf("loadSavedKnot: %v\n", err))
+		return
+	}
+	img, _, err := decodeKnotImage(data, knot.PNG)
+	if err != nil {
+		g.propsArea.SetText(fmt.Sprintf("loadSavedKnot decode: %v\n", err))
+		return
+	}
+	g.currentKnot = nil
+	g.blitKnotOnCanvas(img)
+	g.imageWidget.DebugCrossings = nil
+	g.imageWidget.DebugArcs = nil
+	g.imageWidget.DebugJunctions = nil
+	g.imageWidget.Diagram = nil
+	g.pendingAttach = true
+	g.nameLabel.Label = name
+	g.input.SetText(name)
+	g.propsArea.SetText(fmt.Sprintf("loaded saved diagram: %s\n", path))
+}
+
+// savedKnotPath returns the on-disk path for a saved diagram named
+// `name`. Lives in saved/ at the repo root (a sibling of
+// cmd/knotty/).
+func savedKnotPath(name string) string {
+	return filepath.Join("saved", name+".png")
+}
+
+// doSave snapshots the current canvas contents and writes them as a
+// PNG to saved/<name>.png, where <name> comes from the search input
+// box. Used to capture diagrams produced via R-moves / Beautify so
+// they can be reloaded later by typing the saved name.
+func (g *game) doSave() {
+	name := trim(g.input.GetText())
+	if name == "" {
+		g.propsArea.SetText("save: need a name (type one in the search box first)\n")
+		return
+	}
+	canvas := g.imageWidget.Image
+	if canvas == nil {
+		g.propsArea.SetText("save: no canvas\n")
+		return
+	}
+	if err := os.MkdirAll("saved", 0o755); err != nil {
+		g.propsArea.SetText(fmt.Sprintf("save: mkdir: %v\n", err))
+		return
+	}
+	b := canvas.Bounds()
+	w, h := b.Dx(), b.Dy()
+	pix := make([]byte, 4*w*h)
+	canvas.ReadPixels(pix)
+	rgba := &stdimage.RGBA{Pix: pix, Stride: 4 * w, Rect: stdimage.Rect(0, 0, w, h)}
+	path := savedKnotPath(name)
+	f, err := os.Create(path)
+	if err != nil {
+		g.propsArea.SetText(fmt.Sprintf("save: create: %v\n", err))
+		return
+	}
+	defer f.Close()
+	if err := png.Encode(f, rgba); err != nil {
+		g.propsArea.SetText(fmt.Sprintf("save: encode: %v\n", err))
+		return
+	}
+	g.propsArea.SetText(fmt.Sprintf("saved %s\n", path))
 }
 
 // enterDrawingMode puts the UI into a nameless "Drawing" state: blank

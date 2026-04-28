@@ -77,18 +77,15 @@ type scaledImage struct {
 	drag dragState
 
 	// lassoPath is the cursor path collected during a ToolReidemeister
-	// drag. Coordinates are in source-image (canvas) pixels. Empty when
-	// no lasso is in progress; the host clears it (via OnLasso) only
-	// after consuming a completed lasso, otherwise the overlay keeps
-	// painting it. Reset on every press to start a fresh path.
+	// drag. Coordinates are in source-image (canvas) pixels. While the
+	// pointer is pressed, lassoPressed is true and the path tracks the
+	// in-progress drag. On release with at least 3 points, the first
+	// point is appended to close the polygon and lassoPressed flips to
+	// false — the path then persists as a "pending" lasso awaiting
+	// CommitLasso (OK) or CancelLasso. Pressing again starts a fresh
+	// drag and replaces any pending lasso.
 	lassoPath    []image.Point
 	lassoPressed bool
-
-	// OnLasso is invoked with the auto-closed lasso polygon (last
-	// point == first point, in source-image pixel coordinates) once
-	// the pointer is released after a ToolReidemeister drag. nil
-	// disables the tool's effect (it still draws the overlay).
-	OnLasso func(closed []image.Point)
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -250,11 +247,16 @@ func (s *scaledImage) handleLasso() {
 
 	if pressed {
 		if !s.lassoPressed {
-			// New lasso. Reset path and seed with first point.
-			s.lassoPath = s.lassoPath[:0]
-			if inBounds {
-				s.lassoPath = append(s.lassoPath, image.Point{X: int(px), Y: int(py)})
+			// Only treat a press as the start of a new lasso when it
+			// lands inside the canvas. Out-of-bounds presses (e.g. on
+			// the OK / lasso toolbar buttons) must NOT disturb a
+			// pending lasso — the OK click runs on release and reads
+			// from lassoPath, so wiping it here would lose the curve.
+			if !inBounds {
+				return
 			}
+			s.lassoPath = s.lassoPath[:0]
+			s.lassoPath = append(s.lassoPath, image.Point{X: int(px), Y: int(py)})
 			s.lassoPressed = true
 			return
 		}
@@ -278,16 +280,34 @@ func (s *scaledImage) handleLasso() {
 	}
 	s.lassoPressed = false
 	if len(s.lassoPath) >= 3 {
-		// Auto-close: append the first point so the polygon is closed
-		// and the host's point-in-polygon test sees the loop edge.
-		closed := make([]image.Point, len(s.lassoPath)+1)
-		copy(closed, s.lassoPath)
-		closed[len(s.lassoPath)] = s.lassoPath[0]
-		if s.OnLasso != nil {
-			s.OnLasso(closed)
-		}
+		// Auto-close in place: append the first point so the polygon
+		// reads as closed both visually (render loop draws the closing
+		// segment) and for the host's point-in-polygon tests. Path
+		// stays in lassoPath as a "pending" lasso until CommitLasso or
+		// CancelLasso.
+		s.lassoPath = append(s.lassoPath, s.lassoPath[0])
+		return
 	}
 	s.lassoPath = nil
+}
+
+// CommitLasso returns the pending closed lasso polygon (last point ==
+// first point, in source-image pixel coordinates) and clears it.
+// Returns nil if no lasso is pending or one is still being drawn.
+func (s *scaledImage) CommitLasso() []image.Point {
+	if s.lassoPressed || len(s.lassoPath) < 4 {
+		return nil
+	}
+	closed := append([]image.Point(nil), s.lassoPath...)
+	s.lassoPath = nil
+	return closed
+}
+
+// CancelLasso clears any pending or in-progress lasso polygon so the
+// overlay disappears. Safe to call when there is no lasso.
+func (s *scaledImage) CancelLasso() {
+	s.lassoPath = nil
+	s.lassoPressed = false
 }
 
 // handleDragging routes pointer input into the drag state machine.
