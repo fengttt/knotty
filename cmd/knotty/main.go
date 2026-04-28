@@ -121,7 +121,7 @@ type game struct {
 }
 
 func main() {
-	g := &game{currentStyle: knot.StyleDiagram}
+	g := &game{currentStyle: knot.StyleSnappy}
 
 	face, err := loadFont(14)
 	if err != nil {
@@ -457,7 +457,8 @@ func (g *game) buildStyleCombo() *widget.ListComboButton {
 			g.refreshImage()
 		}),
 	)
-	combo.SetSelectedEntry(entries[0])
+	// Default style is Snappy (index 2 in styleEntries).
+	combo.SetSelectedEntry(entries[2])
 	return combo
 }
 
