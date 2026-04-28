@@ -18,6 +18,13 @@ type debugArcMark struct {
 	Info string
 }
 
+// debugLassoMark is a circle+label overlay used by the "Debug Lasso"
+// view. The label is always rendered next to the circle (not on hover).
+type debugLassoMark struct {
+	At    image.Point
+	Label string
+}
+
 // Drawing tools for scaledImage's pencil/eraser mode.
 const (
 	ToolPencil = 0
@@ -103,6 +110,18 @@ type scaledImage struct {
 	// couldn't separate over from under. Rendered as orange circles so
 	// they're distinguishable from resolved crossings.
 	DebugJunctions []image.Point
+
+	// DebugLassoMarks are the "Debug Lasso" overlay: each mark is
+	// drawn as a red circle with a text label. Used to surface the
+	// lasso/Diagram interaction (boundary intersections labelled S1..,
+	// inside-lasso crossings labelled with their Diagram index).
+	DebugLassoMarks []debugLassoMark
+
+	// DebugLassoStrand is the movable strand the R3 detector found
+	// inside the pending lasso. Each entry is a polyline (in source-
+	// image pixel coordinates) drawn as a blue overlay on top of the
+	// canvas. Cleared together with DebugLassoMarks.
+	DebugLassoStrand [][]image.Point
 
 	// DebugFace is the font face used to render crossing index labels.
 	// When nil, labels are skipped.
@@ -303,6 +322,16 @@ func (s *scaledImage) CommitLasso() []image.Point {
 	return closed
 }
 
+// PendingLasso returns a copy of the pending closed lasso polygon
+// without clearing it. Returns nil if no lasso is pending. Used by
+// non-destructive consumers (e.g. the Debug Lasso overlay).
+func (s *scaledImage) PendingLasso() []image.Point {
+	if s.lassoPressed || len(s.lassoPath) < 4 {
+		return nil
+	}
+	return append([]image.Point(nil), s.lassoPath...)
+}
+
 // CancelLasso clears any pending or in-progress lasso polygon so the
 // overlay disappears. Safe to call when there is no lasso.
 func (s *scaledImage) CancelLasso() {
@@ -498,7 +527,7 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 		}
 	}
 
-	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 && len(s.DebugJunctions) == 0 {
+	if len(s.DebugCrossings) == 0 && len(s.DebugArcs) == 0 && len(s.DebugJunctions) == 0 && len(s.DebugLassoMarks) == 0 && len(s.DebugLassoStrand) == 0 {
 		return
 	}
 	r := float32(8)
@@ -547,6 +576,34 @@ func (s *scaledImage) Render(screen *ebiten.Image) {
 	}
 	if hoverText != "" && s.DebugFace != nil {
 		s.drawTooltip(screen, hoverText, mx, my)
+	}
+	// "Debug Lasso" movable strand — drawn first as thick blue
+	// polylines so the red circles and labels sit on top.
+	clrStrand := color.NRGBA{0x40, 0x80, 0xff, 0xff}
+	for _, poly := range s.DebugLassoStrand {
+		for i := 0; i+1 < len(poly); i++ {
+			p, q := poly[i], poly[i+1]
+			vector.StrokeLine(screen,
+				float32(ox)+float32(p.X)*float32(scale),
+				float32(oy)+float32(p.Y)*float32(scale),
+				float32(ox)+float32(q.X)*float32(scale),
+				float32(oy)+float32(q.Y)*float32(scale),
+				4, clrStrand, true)
+		}
+	}
+	// "Debug Lasso" markers — red circle + always-visible label next
+	// to it. Drawn last so labels sit on top of the strand overlay.
+	clrLasso := color.NRGBA{0xff, 0x40, 0x40, 0xff}
+	for _, m := range s.DebugLassoMarks {
+		cx := float32(ox) + float32(m.At.X)*float32(scale)
+		cy := float32(oy) + float32(m.At.Y)*float32(scale)
+		vector.StrokeCircle(screen, cx, cy, r, 2, clrLasso, true)
+		if s.DebugFace != nil && m.Label != "" {
+			opts := &etext.DrawOptions{}
+			opts.GeoM.Translate(float64(cx+r+3), float64(cy-r))
+			opts.ColorScale.ScaleWithColor(clrLasso)
+			etext.Draw(screen, m.Label, s.DebugFace, opts)
+		}
 	}
 }
 

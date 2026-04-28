@@ -560,6 +560,20 @@ func (g *game) buildSearchRow() *widget.Container {
 	)
 	row2.AddChild(debugBtn)
 
+	debugLassoBtn := widget.NewButton(
+		widget.ButtonOpts.WidgetOpts(
+			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+			widget.WidgetOpts.MinSize(110, 32),
+		),
+		widget.ButtonOpts.Image(buttonImage()),
+		widget.ButtonOpts.Text("Debug Lasso", &g.face, &widget.ButtonTextColor{Idle: color.NRGBA{240, 240, 240, 255}}),
+		widget.ButtonOpts.TextPadding(&widget.Insets{Left: 10, Right: 10, Top: 6, Bottom: 6}),
+		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
+			g.doDebugLasso()
+		}),
+	)
+	row2.AddChild(debugLassoBtn)
+
 	outer.AddChild(row2)
 
 	return outer
@@ -972,6 +986,104 @@ func (g *game) canvasToImage() *stdimage.RGBA {
 		Pix:    pix,
 		Stride: 4 * w,
 		Rect:   stdimage.Rect(0, 0, w, h),
+	}
+}
+
+// doDebugLasso toggles the lasso-debug overlay. With a pending lasso
+// (drawn with the lasso tool but not yet committed via OK), the first
+// click marks every Diagram crossing inside the lasso with a red
+// circle labelled by its Diagram index, marks every arc/lasso
+// boundary intersection with a red circle labelled S1, S2, ... in
+// arc/path order, and (when the R3 detector accepts the lasso) draws
+// the movable strand as a blue polyline overlay. The full debug
+// breakdown is also dumped to the log. A second click clears
+// everything.
+func (g *game) doDebugLasso() {
+	if g.imageWidget == nil {
+		return
+	}
+	if len(g.imageWidget.DebugLassoMarks) > 0 || len(g.imageWidget.DebugLassoStrand) > 0 {
+		g.imageWidget.DebugLassoMarks = nil
+		g.imageWidget.DebugLassoStrand = nil
+		return
+	}
+	lasso := g.imageWidget.PendingLasso()
+	if lasso == nil {
+		log.Printf("debug lasso: no pending lasso")
+		g.propsArea.SetText("debug lasso: draw a lasso first\n")
+		return
+	}
+	d := g.imageWidget.Diagram
+	if d == nil {
+		log.Printf("debug lasso: no diagram attached — dumping canvas pixels in lasso bbox instead")
+		dumpLassoPixels(g.imageWidget.Image, lasso)
+		g.propsArea.SetText("debug lasso: no diagram — see log for pixel dump\n")
+		return
+	}
+
+	bbox := lassoBBox(lasso)
+	log.Printf("debug lasso: bbox x=[%d,%d] y=[%d,%d] (%d pts), %d crossings, %d arcs",
+		bbox.Min.X, bbox.Max.X, bbox.Min.Y, bbox.Max.Y, len(lasso)-1,
+		len(d.Crossings), len(d.Arcs))
+
+	var marks []debugLassoMark
+	for i, c := range d.Crossings {
+		if closedPolygonContainsPoint(lasso, c) {
+			marks = append(marks, debugLassoMark{At: c, Label: fmt.Sprintf("C%d", i)})
+			log.Printf("debug lasso:   C%d inside @ (%d,%d)", i, c.X, c.Y)
+		}
+	}
+	sIdx := 1
+	for ai, a := range d.Arcs {
+		for _, p := range allLassoBoundaryCrossings(a.Polyline, lasso) {
+			log.Printf("debug lasso:   S%d on A%d (C%d→C%d) @ (%d,%d)",
+				sIdx, ai, a.Start.Crossing, a.End.Crossing, p.X, p.Y)
+			marks = append(marks, debugLassoMark{At: p, Label: fmt.Sprintf("S%d", sIdx)})
+			sIdx++
+		}
+	}
+	g.imageWidget.DebugLassoMarks = marks
+
+	if r3, ok := detectR3(d, lasso); ok {
+		log.Printf("debug lasso: movable strand AB = arc %d (C%d↔C%d), pivot = C%d",
+			r3.arcAB, r3.a, r3.b, r3.pivot)
+		var strand [][]stdimage.Point
+		strand = append(strand, append([]stdimage.Point(nil), d.Arcs[r3.arcAB].Polyline...))
+		movOverAtA := arcOverAtCrossing(d.Arcs[r3.arcAB], r3.a)
+		movOverAtB := arcOverAtCrossing(d.Arcs[r3.arcAB], r3.b)
+		exclude := []int{r3.arcAB, r3.arcAP, r3.arcBP}
+		if extA := findExtArc(d, r3.a, exclude, movOverAtA); extA >= 0 {
+			log.Printf("debug lasso:   exterior at A = arc %d (over=%v)", extA, movOverAtA)
+			if clip := clipArcInsideAt(d.Arcs[extA], r3.a, lasso); len(clip) >= 2 {
+				strand = append(strand, clip)
+			}
+		} else {
+			log.Printf("debug lasso:   no exterior arc at A with over=%v found", movOverAtA)
+		}
+		if extB := findExtArc(d, r3.b, exclude, movOverAtB); extB >= 0 {
+			log.Printf("debug lasso:   exterior at B = arc %d (over=%v)", extB, movOverAtB)
+			if clip := clipArcInsideAt(d.Arcs[extB], r3.b, lasso); len(clip) >= 2 {
+				strand = append(strand, clip)
+			}
+		} else {
+			log.Printf("debug lasso:   no exterior arc at B with over=%v found", movOverAtB)
+		}
+		g.imageWidget.DebugLassoStrand = strand
+
+		// C<a>' / C<b>' — the post-R3 anchor points: A and B slide past
+		// the pivot along their non-movable strands, lands at the
+		// midpoint between pivot and the strand's lasso-boundary
+		// crossing. Same positions applyR3 would use.
+		labelA := fmt.Sprintf("C%d'", r3.a)
+		labelB := fmt.Sprintf("C%d'", r3.b)
+		log.Printf("debug lasso:   %s @ (%d,%d), %s @ (%d,%d)",
+			labelA, r3.newA.X, r3.newA.Y, labelB, r3.newB.X, r3.newB.Y)
+		marks = append(marks,
+			debugLassoMark{At: r3.newA, Label: labelA},
+			debugLassoMark{At: r3.newB, Label: labelB})
+		g.imageWidget.DebugLassoMarks = marks
+	} else {
+		log.Printf("debug lasso: no movable strand (R3 conditions not met)")
 	}
 }
 

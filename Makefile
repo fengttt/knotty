@@ -1,5 +1,5 @@
 run:
-	go run ./cmd/knotty
+	go run ./cmd/knotty > knotty.log 2>&1
 
 runwasm:
 	go run github.com/hajimehoshi/wasmserve@latest ./cmd/knotty

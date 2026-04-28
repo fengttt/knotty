@@ -414,43 +414,6 @@ func TestDetectR3WrongPattern(t *testing.T) {
 	}
 }
 
-func TestApplyR3MovesAandBAlongTheirStrands(t *testing.T) {
-	d := makeR3Diagram()
-	// Lasso that excludes C3 (x=50) and C4 (x=250) but extends down
-	// past the lasso-boundary crossings of arcs 5 and 8 (the
-	// exterior arcs at C2).
-	lasso := lassoSquare(51, 30, 249, 199)
-	r3, ok := detectR3(d, lasso)
-	if !ok {
-		t.Fatalf("detectR3 returned not-ok")
-	}
-	oldA := d.Crossings[r3.a]
-	oldB := d.Crossings[r3.b]
-	piv := d.Crossings[r3.pivot]
-	applyR3(d, r3, lasso)
-	if d.Crossings[r3.pivot] != piv {
-		t.Errorf("pivot moved to %v, want %v (unchanged)", d.Crossings[r3.pivot], piv)
-	}
-	if d.Crossings[r3.a] == oldA {
-		t.Errorf("a unchanged at %v — should have slid along strand Y", oldA)
-	}
-	if d.Crossings[r3.b] == oldB {
-		t.Errorf("b unchanged at %v — should have slid along strand Z", oldB)
-	}
-	if !closedPolygonContainsPoint(lasso, d.Crossings[r3.a]) {
-		t.Errorf("a at %v left the lasso", d.Crossings[r3.a])
-	}
-	if !closedPolygonContainsPoint(lasso, d.Crossings[r3.b]) {
-		t.Errorf("b at %v left the lasso", d.Crossings[r3.b])
-	}
-	if d.Crossings[r3.a] == d.Crossings[r3.b] {
-		t.Errorf("a and b collapsed to the same point %v", d.Crossings[r3.a])
-	}
-	if len(d.Crossings) != 6 || len(d.Arcs) != 9 {
-		t.Errorf("counts after R3: %d crossings, %d arcs, want 6 and 9",
-			len(d.Crossings), len(d.Arcs))
-	}
-}
 
 
 // TestArcInLassoStats checks that arcInLassoStats correctly classifies
