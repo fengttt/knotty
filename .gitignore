@@ -55,5 +55,3 @@ dataset/knot_polys.xlsx
 /knotty
 /_site
 
-# User-saved hand-drawn diagrams (runtime data)
-/saved/
