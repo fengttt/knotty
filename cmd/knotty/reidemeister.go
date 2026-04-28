@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"log"
+	"math"
 )
 
 // doReidemeister consumes a closed lasso polygon (in source-image pixel
@@ -50,6 +51,34 @@ func (g *game) doReidemeister(closed []image.Point) {
 		renderDiagram(g.imageWidget.Image, d, canvasBG)
 		g.propsArea.SetText(fmt.Sprintf(
 			"R2: removed bigon (crossings %d, %d)\n", r2.v, r2.w))
+		return
+	}
+	if r3, ok := detectR3(d, closed); ok {
+		log.Printf("reidemeister: R3 hit movable=(%d,%d) pivot=%d "+
+			"arcs movable=%d a-pivot=%d b-pivot=%d",
+			r3.a, r3.b, r3.pivot, r3.arcAB, r3.arcAP, r3.arcBP)
+		// Snapshot the outside-of-lasso polyline points and the 6
+		// boundary intersections BEFORE the rewrite, so we can verify
+		// that R3 leaves everything outside the lasso untouched.
+		preOutside := snapshotOutsidePolyline(d, closed)
+		preBoundary := snapshotBoundaryCrossings(d, closed)
+		for ai, ent := range preBoundary {
+			log.Printf("R3-pre  A%d boundary @ %v (k=%d)", ai, ent.bp, ent.k)
+		}
+		applyR3(d, r3, closed)
+		// NO resampleDiagramArcs here — uniform-arc-length resampling
+		// would replace the carefully-preserved outside-the-lasso
+		// polyline points of every exterior arc that R3 touched. R3
+		// is a strictly-inside-the-lasso edit, so the outside has to
+		// stay byte-for-byte identical.
+		postBoundary := snapshotBoundaryCrossings(d, closed)
+		for ai, ent := range postBoundary {
+			log.Printf("R3-post A%d boundary @ %v (k=%d)", ai, ent.bp, ent.k)
+		}
+		verifyOutsideUnchanged(d, closed, preOutside)
+		renderDiagram(g.imageWidget.Image, d, canvasBG)
+		g.propsArea.SetText(fmt.Sprintf(
+			"R3: slid strand at C%d/C%d across C%d\n", r3.a, r3.b, r3.pivot))
 		return
 	}
 
@@ -760,4 +789,685 @@ func reversePolyline(poly []image.Point) []image.Point {
 		out[len(poly)-1-i] = p
 	}
 	return out
+}
+
+// ----- R3 (strand-slide across a triangle of crossings) -----
+
+// r3Hit names a successful R3 detection. Three crossings inside the
+// lasso form a triangle (each pair connected by exactly one fully-
+// inside arc). The "movable" strand is the one whose two endpoints
+// inside the triangle have the same over flag (both over or both
+// under) — that's the strand that's consistently on top (or bottom)
+// at its two triangle crossings, and the only one that can be slid
+// across the third crossing without changing the over/under
+// pattern. After R3, the two crossings on that strand reflect
+// through the pivot crossing.
+type r3Hit struct {
+	a, b  int // the two crossings the movable strand passes through (these MOVE)
+	pivot int // the third crossing (the one the movable strand slides past — STAYS PUT)
+	arcAB int // index of the movable-strand arc between a and b
+	arcAP int // index of the arc between a and pivot
+	arcBP int // index of the arc between b and pivot
+	// New positions for a and b after the slide. a slides along
+	// strand Y to the opposite side of pivot, B slides along
+	// strand Z, computed as midpoints between pivot and the lasso-
+	// boundary crossing of the strand-Y / strand-Z exterior arcs at
+	// pivot. Pivot's own position is unchanged.
+	newA, newB image.Point
+}
+
+// detectR3 returns an r3Hit if the lasso encloses exactly three
+// crossings, exactly three fully-inside arcs (each connecting a
+// distinct pair of those crossings), and exactly one of those arcs
+// has matching over flags at both endpoints — the canonical R3
+// movable-strand pattern.
+func detectR3(d *Diagram, lasso []image.Point) (r3Hit, bool) {
+	var zero r3Hit
+	insideC := []int{}
+	for i, c := range d.Crossings {
+		if closedPolygonContainsPoint(lasso, c) {
+			insideC = append(insideC, i)
+		}
+	}
+	if len(insideC) != 3 {
+		return zero, false
+	}
+
+	insideA := []int{}
+	for i, a := range d.Arcs {
+		_, all := arcInLassoStats(lasso, a.Polyline)
+		if all {
+			insideA = append(insideA, i)
+		}
+	}
+	if len(insideA) < 3 {
+		return zero, false
+	}
+
+	pairKey := func(p, q int) [2]int {
+		if p > q {
+			return [2]int{q, p}
+		}
+		return [2]int{p, q}
+	}
+	// Filter the fully-inside arcs down to ones that connect TWO
+	// DIFFERENT triangle crossings — those are the triangle's three
+	// edges. Self-loops fully inside (kinks at a triangle crossing)
+	// or arcs to non-triangle crossings are tolerated and left
+	// untouched: detectR3's job is to find a clean triangle.
+	arcByPair := map[[2]int]int{}
+	insideC0, insideC1, insideC2 := insideC[0], insideC[1], insideC[2]
+	isTriV := func(c int) bool {
+		return c == insideC0 || c == insideC1 || c == insideC2
+	}
+	for _, ai := range insideA {
+		a := d.Arcs[ai]
+		s, e := a.Start.Crossing, a.End.Crossing
+		if s == e {
+			continue // self-loop — not a triangle arc
+		}
+		if !isTriV(s) || !isTriV(e) {
+			continue
+		}
+		k := pairKey(s, e)
+		if _, exists := arcByPair[k]; exists {
+			return zero, false // a second arc between the same pair → not a clean triangle
+		}
+		arcByPair[k] = ai
+	}
+	if len(arcByPair) != 3 {
+		return zero, false
+	}
+
+	// Find an arc whose two endpoints have the same over flag — that's
+	// the consistently-over (or consistently-under) strand that R3
+	// can slide. If multiple arcs match (i.e. two of the three strands
+	// are both consistent), prefer the over-strand: it's the
+	// canonical "movable" one in textbook R3 diagrams.
+	movableArc := -1
+	movableArcOver := false
+	var movableAB [2]int
+	for k, ai := range arcByPair {
+		a := d.Arcs[ai]
+		sOver := arcOverAtCrossing(a, k[0])
+		eOver := arcOverAtCrossing(a, k[1])
+		if sOver != eOver {
+			continue
+		}
+		// Match. Take it unless we already have an over-strand match
+		// and this one is under (the over-strand wins ties).
+		if movableArc == -1 || (sOver && !movableArcOver) {
+			movableArc = ai
+			movableArcOver = sOver
+			movableAB = k
+		}
+	}
+	if movableArc < 0 {
+		return zero, false
+	}
+
+	a, b := movableAB[0], movableAB[1]
+	pivot := -1
+	for _, c := range insideC {
+		if c != a && c != b {
+			pivot = c
+			break
+		}
+	}
+	if pivot < 0 {
+		return zero, false
+	}
+
+	hit := r3Hit{
+		a:     a,
+		b:     b,
+		pivot: pivot,
+		arcAB: movableArc,
+		arcAP: arcByPair[pairKey(a, pivot)],
+		arcBP: arcByPair[pairKey(b, pivot)],
+	}
+	// Compute A_new and B_new along strand Y and strand Z respectively.
+	// Strand Y is the one passing through A and pivot (= arcAP); strand
+	// Z passes through B and pivot (= arcBP). For each, find the
+	// exterior arc at pivot on that strand (matching over flag at
+	// pivot), find its lasso-boundary crossing point, and put the new
+	// position at the midpoint between pivot and that boundary.
+	overYatPivot := arcOverAtCrossing(d.Arcs[hit.arcAP], pivot)
+	overZatPivot := arcOverAtCrossing(d.Arcs[hit.arcBP], pivot)
+	hit.newA = newPosAlongStrandExterior(d, lasso, hit, overYatPivot)
+	hit.newB = newPosAlongStrandExterior(d, lasso, hit, overZatPivot)
+	if hit.newA == d.Crossings[pivot] || hit.newB == d.Crossings[pivot] {
+		// Couldn't find a clean exterior arc on one of the strands —
+		// degenerate setup, bail.
+		return zero, false
+	}
+	return hit, true
+}
+
+// newPosAlongStrandExterior returns a point inside the lasso, on
+// strand-side defined by overFlag at pivot, at the midpoint between
+// pivot and the lasso-boundary crossing of the exterior arc at
+// pivot whose endpoint there matches overFlag. Returns the pivot
+// itself when no matching exterior arc can be found.
+func newPosAlongStrandExterior(d *Diagram, lasso []image.Point, r r3Hit, overFlag bool) image.Point {
+	pivotPt := d.Crossings[r.pivot]
+	for i, arc := range d.Arcs {
+		if i == r.arcAB || i == r.arcAP || i == r.arcBP {
+			continue
+		}
+		var match bool
+		if arc.Start.Crossing == r.pivot && arc.Start.Over == overFlag {
+			match = true
+		}
+		if arc.End.Crossing == r.pivot && arc.End.Over == overFlag {
+			match = true
+		}
+		if !match {
+			continue
+		}
+		// Find this arc's lasso-boundary crossing point.
+		k, bp := findLassoBoundaryCrossing(arc.Polyline, lasso)
+		if k < 0 {
+			// Polyline doesn't cross the boundary — exterior arc is
+			// somehow entirely inside or entirely outside; skip.
+			continue
+		}
+		newPt := image.Point{
+			X: (pivotPt.X + bp.X) / 2,
+			Y: (pivotPt.Y + bp.Y) / 2,
+		}
+		if !closedPolygonContainsPoint(lasso, newPt) {
+			continue
+		}
+		return newPt
+	}
+	return pivotPt
+}
+
+// applyR3 performs the strand-slide per doc/reidemeister_r3.md. The
+// non-movable strands (AC and BC) keep their physical curves
+// completely intact — we relabel where the crossings sit along
+// those curves: the crossing that was at position A_old becomes the
+// new C-endpoint along its strand (i.e. the same point on the
+// curve, but the dart graph now says C is there); A's identity
+// moves to a new point further along the curve, past the (still
+// fixed) C. The movable strand AB gets a fresh inside-the-lasso
+// curve from its lasso-boundary entry to A_new to B_new to its
+// lasso-boundary exit. Over/under flags update to reflect each
+// endpoint's new anchor crossing.
+func applyR3(d *Diagram, r r3Hit, lasso []image.Point) {
+	overACatA := arcOverAtCrossing(d.Arcs[r.arcAP], r.a)
+	overACatC := arcOverAtCrossing(d.Arcs[r.arcAP], r.pivot)
+	overBCatB := arcOverAtCrossing(d.Arcs[r.arcBP], r.b)
+	overBCatC := arcOverAtCrossing(d.Arcs[r.arcBP], r.pivot)
+	overABatA := arcOverAtCrossing(d.Arcs[r.arcAB], r.a)
+	overABatB := arcOverAtCrossing(d.Arcs[r.arcAB], r.b)
+
+	tri := []int{r.arcAB, r.arcAP, r.arcBP}
+	extACatA := findExtArc(d, r.a, tri, overACatA)
+	extACatC := findExtArc(d, r.pivot, tri, overACatC)
+	extBCatB := findExtArc(d, r.b, tri, overBCatB)
+	extBCatC := findExtArc(d, r.pivot, tri, overBCatC)
+	extABatA := findExtArc(d, r.a, tri, overABatA)
+	extABatB := findExtArc(d, r.b, tri, overABatB)
+
+	// Snapshot polylines BEFORE any mutation (since strand AC's
+	// processing rewires endpoints that strand BC's processing
+	// would otherwise look up by their old identities, etc.).
+	if extACatA >= 0 && extACatC >= 0 {
+		processStrandACorBC(d, r.arcAP, extACatA, extACatC,
+			r.a, r.pivot, overACatA, overACatC, lasso)
+	}
+	if extBCatB >= 0 && extBCatC >= 0 {
+		processStrandACorBC(d, r.arcBP, extBCatB, extBCatC,
+			r.b, r.pivot, overBCatB, overBCatC, lasso)
+	}
+
+	// Movable strand AB: A and B are now at their new positions.
+	// arcAB connects A_new to B_new with a fresh straight chord.
+	// Each exterior AB arc keeps its outside-of-lasso portion and
+	// reconnects from the lasso boundary to the new crossing.
+	_ = overABatA
+	_ = overABatB
+	straightenArc := func(ai int) {
+		a := &d.Arcs[ai]
+		if len(a.Polyline) < 2 {
+			return
+		}
+		p0 := d.Crossings[a.Start.Crossing]
+		p1 := d.Crossings[a.End.Crossing]
+		n := len(a.Polyline)
+		for i := 0; i < n; i++ {
+			t := float64(i) / float64(n-1)
+			a.Polyline[i] = image.Point{
+				X: int(math.Round(float64(p0.X)*(1-t) + float64(p1.X)*t)),
+				Y: int(math.Round(float64(p0.Y)*(1-t) + float64(p1.Y)*t)),
+			}
+		}
+	}
+	straightenArc(r.arcAB)
+	rebuildAt := func(ai, vertex int) {
+		if ai < 0 {
+			return
+		}
+		a := &d.Arcs[ai]
+		if len(a.Polyline) < 2 {
+			return
+		}
+		if a.Start.Crossing == vertex {
+			rebuildExteriorArcAtStart(a, d.Crossings[vertex], lasso)
+		}
+		if a.End.Crossing == vertex {
+			rebuildExteriorArcAtEnd(a, d.Crossings[vertex], lasso)
+		}
+	}
+	rebuildAt(extABatA, r.a)
+	rebuildAt(extABatB, r.b)
+}
+
+// processStrandACorBC implements the user's spec for one of the two
+// non-movable strands. It rewires the three arcs along that strand
+// so the order of crossings flips (X→A→C→Y becomes X→C→A→Y, with A
+// at a new position along the original curve past C). Polyline
+// points are PRESERVED — the physical strand curve doesn't move,
+// just the crossings' anchor points along it.
+//
+//   - aiInterior: arc connecting movableEnd (A or B) and pivot (C).
+//   - extAtMov: exterior arc anchored at movableEnd before rewire.
+//   - extAtPivot: exterior arc anchored at pivot before rewire.
+//   - movableEnd: A or B (will move to a new position).
+//   - pivot: C (stays put).
+//   - overAtMov, overAtPivot: strand's over flags at those crossings.
+func processStrandACorBC(d *Diagram, aiInterior, extAtMov, extAtPivot, movableEnd, pivot int, overAtMov, overAtPivot bool, lasso []image.Point) {
+	// Orient each polyline along the strand walk direction
+	// "external_at_movableEnd → movableEnd → pivot → external_at_pivot":
+	//   poly1 = ext_at_movableEnd polyline ending at movableEnd.
+	//   poly2 = aiInterior polyline starting at movableEnd, ending at pivot.
+	//   poly3 = ext_at_pivot polyline starting at pivot, ending at external.
+	poly1 := orientPolylineEndingAt(d.Arcs[extAtMov], movableEnd)
+	poly2 := orientPolylineStartingAt(d.Arcs[aiInterior], movableEnd)
+	poly3 := orientPolylineStartingAt(d.Arcs[extAtPivot], pivot)
+
+	// Compute the arc-length midpoint of poly3 from pivot to the
+	// lasso boundary crossing. A_new (or B_new) sits at that point
+	// — interpolated within whatever segment of poly3 contains it,
+	// so the original polyline points are preserved on either side.
+	firstHalf, secondHalf, ANewPos, ok := splitPolylineAtArcLengthMid(poly3, lasso)
+	if !ok {
+		return
+	}
+
+	// Concatenate poly1 + poly2 (skipping the duplicated movableEnd
+	// vertex at the join). That walks external_at_movableEnd → pivot
+	// (since poly2 ends at pivot). This is the new polyline for the
+	// "external_at_movableEnd → C" rewired arc.
+	newPolyForExtAtMov := make([]image.Point, 0, len(poly1)+len(poly2)-1)
+	newPolyForExtAtMov = append(newPolyForExtAtMov, poly1...)
+	newPolyForExtAtMov = append(newPolyForExtAtMov, poly2[1:]...)
+
+	// Interior arc's new polyline: pivot → A_new (firstHalf).
+	newPolyForInterior := firstHalf
+
+	// External-at-pivot arc's new polyline: A_new → external (secondHalf).
+	newPolyForExtAtPivot := secondHalf
+
+	// Update arc records. Each arc keeps the OPPOSITE endpoint that
+	// pointed outside the triangle; only the inside endpoint changes.
+	extAtMovExt := otherEndpoint(d.Arcs[extAtMov], movableEnd)
+	d.Arcs[extAtMov] = Arc{
+		Start:    extAtMovExt,
+		End:      Endpoint{Crossing: pivot, Over: overAtPivot},
+		Polyline: newPolyForExtAtMov,
+	}
+	d.Arcs[aiInterior] = Arc{
+		Start:    Endpoint{Crossing: pivot, Over: overAtPivot},
+		End:      Endpoint{Crossing: movableEnd, Over: overAtMov},
+		Polyline: newPolyForInterior,
+	}
+	extAtPivotExt := otherEndpoint(d.Arcs[extAtPivot], pivot)
+	d.Arcs[extAtPivot] = Arc{
+		Start:    Endpoint{Crossing: movableEnd, Over: overAtMov},
+		End:      extAtPivotExt,
+		Polyline: newPolyForExtAtPivot,
+	}
+	d.Crossings[movableEnd] = ANewPos
+}
+
+// splitPolylineAtArcLengthMid takes a polyline that starts inside
+// the lasso and crosses the boundary somewhere, and returns the
+// polyline split at the arc-length midpoint between poly[0] and
+// the boundary crossing point. The midpoint is included in both
+// halves (last point of firstHalf, first point of secondHalf).
+// Outside-of-lasso polyline points (everything past the boundary
+// crossing index in the original) end up at the tail of secondHalf
+// — preserved exactly. Returns ok=false when poly doesn't cross
+// the boundary.
+func splitPolylineAtArcLengthMid(poly []image.Point, lasso []image.Point) (firstHalf, secondHalf []image.Point, mid image.Point, ok bool) {
+	bIdx, bp := findLassoBoundaryCrossing(poly, lasso)
+	if bIdx <= 0 {
+		return nil, nil, image.Point{}, false
+	}
+	type seg struct {
+		a, b image.Point
+		l    float64
+	}
+	var segs []seg
+	var totalLen float64
+	for i := 0; i < bIdx-1; i++ {
+		s := seg{a: poly[i], b: poly[i+1]}
+		s.l = math.Hypot(float64(s.b.X-s.a.X), float64(s.b.Y-s.a.Y))
+		segs = append(segs, s)
+		totalLen += s.l
+	}
+	// Final partial segment from the last inside point to the
+	// bisected boundary point.
+	tail := seg{a: poly[bIdx-1], b: bp}
+	tail.l = math.Hypot(float64(tail.b.X-tail.a.X), float64(tail.b.Y-tail.a.Y))
+	totalLen += tail.l
+	if totalLen <= 0 {
+		return nil, nil, image.Point{}, false
+	}
+	target := totalLen / 2
+	var acc float64
+	splitSegIdx := -1
+	var splitMid image.Point
+	for i, s := range segs {
+		if acc+s.l >= target && s.l > 0 {
+			t := (target - acc) / s.l
+			splitMid = image.Point{
+				X: int(math.Round(float64(s.a.X) + t*float64(s.b.X-s.a.X))),
+				Y: int(math.Round(float64(s.a.Y) + t*float64(s.b.Y-s.a.Y))),
+			}
+			splitSegIdx = i
+			break
+		}
+		acc += s.l
+	}
+	if splitSegIdx < 0 {
+		// Midpoint is in the trailing partial segment (poly[bIdx-1] → bp).
+		if tail.l > 0 {
+			t := (target - acc) / tail.l
+			splitMid = image.Point{
+				X: int(math.Round(float64(tail.a.X) + t*float64(tail.b.X-tail.a.X))),
+				Y: int(math.Round(float64(tail.a.Y) + t*float64(tail.b.Y-tail.a.Y))),
+			}
+			splitSegIdx = bIdx - 1
+		} else {
+			return nil, nil, image.Point{}, false
+		}
+	}
+	// firstHalf: poly[0..splitSegIdx] then mid (closes at A_new).
+	firstHalf = make([]image.Point, 0, splitSegIdx+2)
+	firstHalf = append(firstHalf, poly[:splitSegIdx+1]...)
+	firstHalf = append(firstHalf, splitMid)
+	// secondHalf: mid then poly[splitSegIdx+1..end] (preserves
+	// inside remnants AND outside-of-lasso tail).
+	secondHalf = make([]image.Point, 0, len(poly)-splitSegIdx)
+	secondHalf = append(secondHalf, splitMid)
+	secondHalf = append(secondHalf, poly[splitSegIdx+1:]...)
+	return firstHalf, secondHalf, splitMid, true
+}
+
+// orientPolylineEndingAt returns arc.Polyline reversed if necessary
+// so polyline[len-1] is at the position of vertex.
+func orientPolylineEndingAt(arc Arc, vertex int) []image.Point {
+	if arc.End.Crossing == vertex {
+		return append([]image.Point(nil), arc.Polyline...)
+	}
+	out := make([]image.Point, len(arc.Polyline))
+	for i, p := range arc.Polyline {
+		out[len(arc.Polyline)-1-i] = p
+	}
+	return out
+}
+
+// orientPolylineStartingAt returns arc.Polyline reversed if
+// necessary so polyline[0] is at the position of vertex.
+func orientPolylineStartingAt(arc Arc, vertex int) []image.Point {
+	if arc.Start.Crossing == vertex {
+		return append([]image.Point(nil), arc.Polyline...)
+	}
+	out := make([]image.Point, len(arc.Polyline))
+	for i, p := range arc.Polyline {
+		out[len(arc.Polyline)-1-i] = p
+	}
+	return out
+}
+
+// otherEndpoint returns whichever of arc.Start and arc.End doesn't
+// reference vertex. Caller is responsible for ensuring vertex
+// appears at exactly one endpoint (i.e. arc isn't a self-loop at v).
+func otherEndpoint(arc Arc, vertex int) Endpoint {
+	if arc.Start.Crossing == vertex {
+		return arc.End
+	}
+	return arc.Start
+}
+
+// findExtArc returns the index of an arc that has an endpoint at
+// vertex with the given over flag and isn't in the exclude list.
+// Returns -1 if no such arc exists.
+func findExtArc(d *Diagram, vertex int, exclude []int, overFlag bool) int {
+	excluded := make(map[int]bool, len(exclude))
+	for _, e := range exclude {
+		excluded[e] = true
+	}
+	for i, arc := range d.Arcs {
+		if excluded[i] {
+			continue
+		}
+		if arc.Start.Crossing == vertex && arc.Start.Over == overFlag {
+			return i
+		}
+		if arc.End.Crossing == vertex && arc.End.Over == overFlag {
+			return i
+		}
+	}
+	return -1
+}
+
+// rewireArcEndpoint changes whichever endpoint of arc currently
+// references (oldCrossing, oldOver) so it instead references
+// (newCrossing, newOver). Used by R3 to flip the order of crossings
+// along a non-movable strand.
+func rewireArcEndpoint(arc *Arc, oldCrossing, newCrossing int, oldOver, newOver bool) {
+	if arc.Start.Crossing == oldCrossing && arc.Start.Over == oldOver {
+		arc.Start.Crossing = newCrossing
+		arc.Start.Over = newOver
+		return
+	}
+	if arc.End.Crossing == oldCrossing && arc.End.Over == oldOver {
+		arc.End.Crossing = newCrossing
+		arc.End.Over = newOver
+		return
+	}
+}
+
+// rebuildExteriorArcAtStart rewrites the inside-the-lasso portion of
+// a's polyline (the start side) so it goes from the moved crossing
+// position newPos to the first preserved outside-the-lasso polyline
+// point, leaving the outside portion byte-for-byte intact.
+//
+// The line segment from newPos to poly[k] (the first outside point)
+// crosses the lasso boundary somewhere — we don't insert an explicit
+// boundary point because doing so would change the count of "outside
+// points" by ±1, which the R3-OK verification flags as a violation.
+// The renderer's Chaikin smoothing makes the crossing point look
+// natural anyway.
+func rebuildExteriorArcAtStart(a *Arc, newPos image.Point, lasso []image.Point) {
+	k, _ := findLassoBoundaryCrossing(a.Polyline, lasso)
+	if k < 0 {
+		// Polyline is entirely on one side of the lasso boundary
+		// (rare; only happens for very tight or very wide lassoes).
+		// Just snap the endpoint.
+		a.Polyline[0] = newPos
+		return
+	}
+	out := make([]image.Point, 0, 1+len(a.Polyline)-k)
+	out = append(out, newPos)
+	out = append(out, a.Polyline[k:]...)
+	a.Polyline = out
+}
+
+// rebuildExteriorArcAtEnd rewrites the inside-the-lasso portion of
+// a's polyline (the end side) so it goes from the lasso-boundary
+// crossing to the moved crossing position newPos, leaving the
+// outside-the-lasso portion exactly intact.
+//
+// Uses findLastLassoBoundaryCrossing rather than the
+// first-transition variant: for self-loop arcs (Start.Crossing ==
+// End.Crossing both at a moved crossing) the polyline crosses the
+// lasso boundary twice, and the End-side rebuild needs to target
+// the SECOND (last) transition so it doesn't collapse what the
+// Start-side rebuild already preserved.
+func rebuildExteriorArcAtEnd(a *Arc, newPos image.Point, lasso []image.Point) {
+	k, _ := findLastLassoBoundaryCrossing(a.Polyline, lasso)
+	if k < 0 {
+		a.Polyline[len(a.Polyline)-1] = newPos
+		return
+	}
+	out := make([]image.Point, 0, k+1)
+	out = append(out, a.Polyline[:k]...)
+	out = append(out, newPos)
+	a.Polyline = out
+}
+
+// findLastLassoBoundaryCrossing walks poly from the END backward and
+// returns the LAST boundary transition (the one closest to the end
+// of the polyline). Returns the index k of the polyline point on
+// the END side of the boundary plus an interpolated boundary point.
+// (-1, _) when poly never transitions.
+func findLastLassoBoundaryCrossing(poly []image.Point, lasso []image.Point) (int, image.Point) {
+	if len(poly) < 2 {
+		return -1, image.Point{}
+	}
+	insideEnd := closedPolygonContainsPoint(lasso, poly[len(poly)-1])
+	for i := len(poly) - 2; i >= 0; i-- {
+		if closedPolygonContainsPoint(lasso, poly[i]) != insideEnd {
+			a, b := poly[i], poly[i+1]
+			aInside := !insideEnd
+			for j := 0; j < 8; j++ {
+				m := image.Point{X: (a.X + b.X) / 2, Y: (a.Y + b.Y) / 2}
+				if closedPolygonContainsPoint(lasso, m) == aInside {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			return i + 1, image.Point{X: (a.X + b.X) / 2, Y: (a.Y + b.Y) / 2}
+		}
+	}
+	return -1, image.Point{}
+}
+
+// boundaryEntry captures where an arc's polyline crosses the lasso
+// boundary, plus the polyline index of the first point on the
+// opposite side of the boundary. Used to verify R3 leaves the
+// outside-of-lasso part unchanged.
+type boundaryEntry struct {
+	bp image.Point
+	k  int
+}
+
+// snapshotBoundaryCrossings returns one boundaryEntry per arc whose
+// polyline straddles the lasso boundary. Arcs entirely inside or
+// entirely outside the lasso are skipped.
+func snapshotBoundaryCrossings(d *Diagram, lasso []image.Point) map[int]boundaryEntry {
+	out := map[int]boundaryEntry{}
+	for i, a := range d.Arcs {
+		k, bp := findLassoBoundaryCrossing(a.Polyline, lasso)
+		if k < 0 {
+			continue
+		}
+		out[i] = boundaryEntry{bp: bp, k: k}
+	}
+	return out
+}
+
+// snapshotOutsidePolyline records, for every arc, just the polyline
+// points that lie outside the lasso. After R3, these points must be
+// identical (byte-for-byte) — that's the user-visible "the diagram
+// outside the lasso area must not change" contract.
+func snapshotOutsidePolyline(d *Diagram, lasso []image.Point) map[int][]image.Point {
+	out := map[int][]image.Point{}
+	for i, a := range d.Arcs {
+		var keep []image.Point
+		for _, p := range a.Polyline {
+			if !closedPolygonContainsPoint(lasso, p) {
+				keep = append(keep, p)
+			}
+		}
+		if keep != nil {
+			out[i] = keep
+		}
+	}
+	return out
+}
+
+// verifyOutsideUnchanged compares the post-R3 outside-the-lasso
+// points of each arc with the pre-R3 snapshot. Every arc's outside
+// portion must be identical, in the same order. Differences are
+// logged as warnings — they signal a bug in the R3 rewrite.
+func verifyOutsideUnchanged(d *Diagram, lasso []image.Point, pre map[int][]image.Point) {
+	violations := 0
+	for i, a := range d.Arcs {
+		var post []image.Point
+		for _, p := range a.Polyline {
+			if !closedPolygonContainsPoint(lasso, p) {
+				post = append(post, p)
+			}
+		}
+		preList, ok := pre[i]
+		if !ok {
+			if len(post) > 0 {
+				log.Printf("R3-VIOL A%d: had no outside points pre-R3 but %d post", i, len(post))
+				violations++
+			}
+			continue
+		}
+		if len(preList) != len(post) {
+			log.Printf("R3-VIOL A%d: outside count %d → %d", i, len(preList), len(post))
+			violations++
+			continue
+		}
+		for j := range preList {
+			if preList[j] != post[j] {
+				log.Printf("R3-VIOL A%d: outside[%d] %v → %v", i, j, preList[j], post[j])
+				violations++
+			}
+		}
+	}
+	if violations == 0 {
+		log.Printf("R3-OK: every arc's outside-of-lasso polyline is identical pre/post.")
+	} else {
+		log.Printf("R3-VIOL: %d outside-of-lasso polyline points changed.", violations)
+	}
+}
+
+// findLassoBoundaryCrossing locates the first index k in poly such
+// that poly[k-1] and poly[k] are on opposite sides of the lasso
+// polygon (one inside, one outside). Returns k together with a
+// bisected approximation of the boundary point. Returns (-1, _) if
+// the polyline never transitions.
+func findLassoBoundaryCrossing(poly []image.Point, lasso []image.Point) (int, image.Point) {
+	if len(poly) < 2 {
+		return -1, image.Point{}
+	}
+	inside0 := closedPolygonContainsPoint(lasso, poly[0])
+	for i := 1; i < len(poly); i++ {
+		if closedPolygonContainsPoint(lasso, poly[i]) != inside0 {
+			a, b := poly[i-1], poly[i]
+			aInside := inside0
+			for j := 0; j < 8; j++ {
+				m := image.Point{X: (a.X + b.X) / 2, Y: (a.Y + b.Y) / 2}
+				if closedPolygonContainsPoint(lasso, m) == aInside {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			return i, image.Point{X: (a.X + b.X) / 2, Y: (a.Y + b.Y) / 2}
+		}
+	}
+	return -1, image.Point{}
 }

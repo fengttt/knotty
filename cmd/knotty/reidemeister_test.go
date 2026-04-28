@@ -304,6 +304,155 @@ func TestDetectR2WrongOverPattern(t *testing.T) {
 	}
 }
 
+// ----- R3 (strand-slide) -----
+
+// makeR3Diagram builds a 6-crossing Diagram whose crossings 0, 1, 2
+// form an R3-applicable triangle with the movable strand running
+// between C0 and C1 (over at both endpoints). The remaining
+// crossings 3, 4, 5 absorb the six exterior arcs that anchor the
+// triangle in the rest of the diagram.
+//
+// At C0 the four darts come from: arcA-tri (over, to C1), arcA-in
+// (under, to C2), and two exterior arcs.
+func makeR3Diagram() *Diagram {
+	c0 := image.Point{X: 100, Y: 100}
+	c1 := image.Point{X: 200, Y: 100}
+	c2 := image.Point{X: 150, Y: 50}
+	c3 := image.Point{X: 50, Y: 100}
+	c4 := image.Point{X: 250, Y: 100}
+	c5 := image.Point{X: 150, Y: 200}
+	d := &Diagram{
+		Crossings: []image.Point{c0, c1, c2, c3, c4, c5},
+		Arcs: []Arc{
+			// 0: triangle arc C0–C1 — movable strand, OVER at both.
+			{
+				Polyline: []image.Point{c0, {150, 110}, c1},
+				Start:    Endpoint{Crossing: 0, Over: true},
+				End:      Endpoint{Crossing: 1, Over: true},
+			},
+			// 1: triangle arc C0–C2 — alternating (under at C0, over at C2).
+			{
+				Polyline: []image.Point{c0, {120, 70}, c2},
+				Start:    Endpoint{Crossing: 0, Over: false},
+				End:      Endpoint{Crossing: 2, Over: true},
+			},
+			// 2: triangle arc C1–C2 — alternating (over at C1, under
+			// at C2; arc 1 already takes the "over at C2" role so
+			// strand Z must be under at C2).
+			{
+				Polyline: []image.Point{c1, {180, 70}, c2},
+				Start:    Endpoint{Crossing: 1, Over: true},
+				End:      Endpoint{Crossing: 2, Over: false},
+			},
+			// 3: exterior at C0 — to C3.
+			{
+				Polyline: []image.Point{c3, {75, 100}, c0},
+				Start:    Endpoint{Crossing: 3, Over: false},
+				End:      Endpoint{Crossing: 0, Over: true},
+			},
+			// 4: exterior at C1 — to C4.
+			{
+				Polyline: []image.Point{c1, {225, 100}, c4},
+				Start:    Endpoint{Crossing: 1, Over: true},
+				End:      Endpoint{Crossing: 4, Over: false},
+			},
+			// 5: exterior at C2 — to C5.
+			{
+				Polyline: []image.Point{c2, {150, 125}, c5},
+				Start:    Endpoint{Crossing: 2, Over: false},
+				End:      Endpoint{Crossing: 5, Over: false},
+			},
+			// 6, 7, 8: exterior fillers at C0/C1/C2 to keep them 4-valent.
+			{
+				Polyline: []image.Point{c0, {100, 75}, c3},
+				Start:    Endpoint{Crossing: 0, Over: false},
+				End:      Endpoint{Crossing: 3, Over: true},
+			},
+			{
+				Polyline: []image.Point{c1, {200, 75}, c4},
+				Start:    Endpoint{Crossing: 1, Over: false},
+				End:      Endpoint{Crossing: 4, Over: true},
+			},
+			{
+				Polyline: []image.Point{c2, {150, 25}, c5},
+				Start:    Endpoint{Crossing: 2, Over: true},
+				End:      Endpoint{Crossing: 5, Over: true},
+			},
+		},
+	}
+	return d
+}
+
+func TestDetectR3Simple(t *testing.T) {
+	d := makeR3Diagram()
+	lasso := lassoSquare(80, 30, 220, 130) // surrounds C0, C1, C2
+	r3, ok := detectR3(d, lasso)
+	if !ok {
+		t.Fatalf("detectR3 returned not-ok")
+	}
+	// The movable arc is index 0 (C0(over)→C1(over)). Pivot is C2.
+	if r3.arcAB != 0 {
+		t.Errorf("arcAB = %d, want 0", r3.arcAB)
+	}
+	if r3.pivot != 2 {
+		t.Errorf("pivot = %d, want 2", r3.pivot)
+	}
+	hasC0 := r3.a == 0 || r3.b == 0
+	hasC1 := r3.a == 1 || r3.b == 1
+	if !hasC0 || !hasC1 {
+		t.Errorf("movable endpoints %d,%d, want 0 and 1", r3.a, r3.b)
+	}
+}
+
+func TestDetectR3WrongPattern(t *testing.T) {
+	d := makeR3Diagram()
+	// Break the movable strand's matching over flags.
+	d.Arcs[0].End.Over = false
+	lasso := lassoSquare(80, 30, 220, 130)
+	if _, ok := detectR3(d, lasso); ok {
+		t.Errorf("detectR3 should not match when no arc has matching over flags")
+	}
+}
+
+func TestApplyR3MovesAandBAlongTheirStrands(t *testing.T) {
+	d := makeR3Diagram()
+	// Lasso that excludes C3 (x=50) and C4 (x=250) but extends down
+	// past the lasso-boundary crossings of arcs 5 and 8 (the
+	// exterior arcs at C2).
+	lasso := lassoSquare(51, 30, 249, 199)
+	r3, ok := detectR3(d, lasso)
+	if !ok {
+		t.Fatalf("detectR3 returned not-ok")
+	}
+	oldA := d.Crossings[r3.a]
+	oldB := d.Crossings[r3.b]
+	piv := d.Crossings[r3.pivot]
+	applyR3(d, r3, lasso)
+	if d.Crossings[r3.pivot] != piv {
+		t.Errorf("pivot moved to %v, want %v (unchanged)", d.Crossings[r3.pivot], piv)
+	}
+	if d.Crossings[r3.a] == oldA {
+		t.Errorf("a unchanged at %v — should have slid along strand Y", oldA)
+	}
+	if d.Crossings[r3.b] == oldB {
+		t.Errorf("b unchanged at %v — should have slid along strand Z", oldB)
+	}
+	if !closedPolygonContainsPoint(lasso, d.Crossings[r3.a]) {
+		t.Errorf("a at %v left the lasso", d.Crossings[r3.a])
+	}
+	if !closedPolygonContainsPoint(lasso, d.Crossings[r3.b]) {
+		t.Errorf("b at %v left the lasso", d.Crossings[r3.b])
+	}
+	if d.Crossings[r3.a] == d.Crossings[r3.b] {
+		t.Errorf("a and b collapsed to the same point %v", d.Crossings[r3.a])
+	}
+	if len(d.Crossings) != 6 || len(d.Arcs) != 9 {
+		t.Errorf("counts after R3: %d crossings, %d arcs, want 6 and 9",
+			len(d.Crossings), len(d.Arcs))
+	}
+}
+
+
 // TestArcInLassoStats checks that arcInLassoStats correctly classifies
 // arcs as inside-only, outside-only, or boundary-crossing.
 func TestArcInLassoStats(t *testing.T) {
