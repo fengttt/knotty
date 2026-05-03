@@ -848,7 +848,11 @@ func (g *game) doConvert() {
 	if nc, err := d.NumComponents(); err == nil && nc == 1 {
 		fmt.Fprintf(&b, "\ncomponents: 1 (knot)\n")
 		if pd, err := d.PD(); err == nil {
-			fmt.Fprintf(&b, "PD: %s\n", formatPD(pd))
+			// Print the canonical PD (lex-smallest over all
+			// start_dart choices) so the displayed code matches what
+			// KnotInfo and our wide test compare against, regardless
+			// of which arc index the walk happened to start at.
+			fmt.Fprintf(&b, "PD: %s\n", formatPD(canonicalPD(pd)))
 		} else {
 			fmt.Fprintf(&b, "PD: (%v)\n", err)
 		}

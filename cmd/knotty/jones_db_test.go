@@ -119,9 +119,21 @@ func TestJonesAgainstDatabase(t *testing.T) {
 	}
 }
 
-// compareJones runs the convert→Jones pipeline against one knot and
-// returns (msg, sweepPass | sweepSkip | sweepFail). The msg is a
-// short human-readable failure line (empty on pass / skip).
+// compareJones runs the convert→PD/Jones pipeline against one knot
+// and returns (msg, sweepPass | sweepSkip | sweepFail). A pass
+// requires both the canonical PD and the Jones polynomial to match
+// the dataset.
+//
+// Canonical PD comparison: we canonicalize both ours and the
+// dataset's PD with canonicalPD (lex-smallest over all
+// (start_crossing, exit_position) walks). For the same diagram both
+// canonicalizations must produce identical outputs; mismatches mean
+// either our converted-image diagram differs from the dataset's
+// stored diagram (Reidemeister-equivalent but not identical) or the
+// pipeline got it wrong.
+//
+// Jones comparison is chirality-tolerant — convert may have
+// produced the mirror diagram (with same Jones up to t → 1/t).
 func compareJones(name string, style knot.ImageType) (string, sweepResult) {
 	k, err := knot.FindKnotByName(name)
 	if err != nil {
@@ -138,6 +150,7 @@ func compareJones(name string, style knot.ImageType) (string, sweepResult) {
 	if err != nil {
 		return fmt.Sprintf("%s: parseJonesPoly(%q): %v", name, wantStr, err), sweepFail
 	}
+	wantPDInt8 := k.GetPdNotation()
 
 	data, kind, err := k.LoadImage(style)
 	if err != nil {
@@ -163,13 +176,38 @@ func compareJones(name string, style knot.ImageType) (string, sweepResult) {
 	if g.NumComponents() != 1 {
 		return fmt.Sprintf("%s: NumComponents=%d (expected 1)", name, g.NumComponents()), sweepFail
 	}
+
+	// Canonical PD check.
+	gotPD := canonicalPD(g.PD())
+	if len(wantPDInt8) > 0 {
+		wantPD := pdFromInt8(wantPDInt8)
+		wantPDCanon := canonicalPD(wantPD)
+		if !equalPD(gotPD, wantPDCanon) {
+			return fmt.Sprintf("%s: canonical PD mismatch: got %v, want %v",
+				name, gotPD, wantPDCanon), sweepFail
+		}
+	}
+
+	// Jones check (mirror-tolerant).
 	got, err := g.jones()
 	if err != nil {
 		return fmt.Sprintf("%s: jones: %v", name, err), sweepFail
 	}
-	if polyEqual(got, want) || polyEqual(got, mirrorPoly(want)) {
-		return "", sweepPass
+	if !polyEqual(got, want) && !polyEqual(got, mirrorPoly(want)) {
+		return fmt.Sprintf("%s: V(t)=%s; want %s (or its mirror)",
+			name, formatPoly(got, "t"), formatPoly(want, "t")), sweepFail
 	}
-	return fmt.Sprintf("%s: V(t)=%s; want %s (or its mirror)",
-		name, formatPoly(got, "t"), formatPoly(want, "t")), sweepFail
+	return "", sweepPass
+}
+
+// pdFromInt8 widens the dataset's [][4]int8 representation to the
+// [][4]int we use internally. Arc ids in KnotInfo PDs fit in int8
+// only because crossing counts are small (max ~64 arcs at 32
+// crossings); the wider int makes arithmetic and indexing trivial.
+func pdFromInt8(pd [][4]int8) [][4]int {
+	out := make([][4]int, len(pd))
+	for i, e := range pd {
+		out[i] = [4]int{int(e[0]), int(e[1]), int(e[2]), int(e[3])}
+	}
+	return out
 }
