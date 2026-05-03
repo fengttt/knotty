@@ -642,15 +642,259 @@ func findVertID(verts []fPoint, v fPoint) int {
 }
 
 // FusedJunctionsError reports that the thinned skeleton contains pixels
-// with more than two same-color neighbors — the convert pipeline cannot
-// resolve over/under at those locations. Junctions holds the pixel
-// coordinates so the caller can render them for debugging.
+// with more than two same-color neighbors AND those pixels form a cluster
+// the convert pipeline cannot interpret as a single 4-valent crossing —
+// e.g. a Y-junction with 3 exits or a tangle with 5+ exits. Clean
+// "solid X" crossings (4 exits) are now resolved as ambiguous crossings
+// rather than being rejected here. Junctions holds the pixel coordinates
+// of the offending cluster pixels so the caller can render them for
+// debugging.
 type FusedJunctionsError struct {
 	Junctions []image.Point
 }
 
 func (e *FusedJunctionsError) Error() string {
 	return fmt.Sprintf("%d fused junctions in skeleton — cannot interpret", len(e.Junctions))
+}
+
+// junctionCluster is one 8-connected group of skeleton junction pixels
+// (sameNeighbors > 2) that the convert pipeline has chosen to interpret
+// as a single 4-valent ambiguous crossing — a "solid X" with no detected
+// over/under gap. exits are the four skeleton pixels just outside the
+// cluster that the four arms enter through; centroid is the geometric
+// center used as the crossing's vertex position.
+type junctionCluster struct {
+	pixels   []image.Point
+	centroid fPoint
+	exits    []image.Point
+}
+
+// junctionMergeDist is the maximum skeleton-path distance (in 8-connected
+// steps) between two junction pixels for them to be considered part of
+// the same ambiguous crossing. Thinning a thick "solid X" tends to
+// produce two Y-junctions joined by a short bridge (a "bowtie"), and
+// that bridge is typically the line thickness in length. 15 covers
+// hand-drawn strokes up to ~12 px wide; larger strokes will not merge
+// and will still report as fused-junction errors.
+const junctionMergeDist = 15
+
+// findJunctionClusters groups junction pixels (sameNeighbors > 2) into
+// merged clusters, treating each cluster as a single ambiguous 4-valent
+// crossing.
+//
+// Clustering is two-stage: junctions are first grouped by 8-connectivity
+// (handles compact multi-pixel junctions) and then merged across short
+// skeleton bridges of at most junctionMergeDist hops (handles "bowtie"
+// patterns from thinning a thick X). For each merged cluster we then
+// add the bridging skeleton pixels themselves to the cluster, so that
+// erasing the cluster from the skeleton leaves exactly four outward
+// stub-arms whose tip pixels become the cluster's exits.
+//
+// Clusters whose exit count is exactly four are returned in resolvable;
+// everything else is reported in unresolvable so the caller can bail
+// with FusedJunctionsError. p is not modified — the caller erases
+// cluster pixels later, after findEndpoints and matchEndpoints have
+// run on the original skeleton.
+func findJunctionClusters(p *pixbuf) (resolvable []junctionCluster, unresolvable []image.Point) {
+	isJunc := func(x, y int) bool {
+		return p.buf[y*p.w+x] > 0 && p.sameNeighbors(x, y) > 2
+	}
+
+	// Step 1: enumerate junction pixels.
+	var juncList []image.Point
+	for y := 1; y < p.h-1; y++ {
+		for x := 1; x < p.w-1; x++ {
+			if isJunc(x, y) {
+				juncList = append(juncList, image.Point{X: x, Y: y})
+			}
+		}
+	}
+	if len(juncList) == 0 {
+		return nil, nil
+	}
+	juncIdxOf := make(map[int]int, len(juncList))
+	for i, pt := range juncList {
+		juncIdxOf[pt.Y*p.w+pt.X] = i
+	}
+
+	// Step 2: union-find over junctions. Two junctions merge if their
+	// skeleton-path distance is within junctionMergeDist; this also
+	// covers 8-adjacent junctions (distance 1) so the old 8-connected
+	// case is subsumed.
+	parent := make([]int, len(juncList))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(x int) int {
+		for parent[x] != x {
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		}
+		return x
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra != rb {
+			parent[ra] = rb
+		}
+	}
+	for ji, jpt := range juncList {
+		seen := make(map[int]bool)
+		startIdx := jpt.Y*p.w + jpt.X
+		seen[startIdx] = true
+		type bfsItem struct{ idx, d int }
+		queue := []bfsItem{{startIdx, 0}}
+		for h := 0; h < len(queue); h++ {
+			cur := queue[h]
+			if cur.d >= junctionMergeDist {
+				continue
+			}
+			cx, cy := cur.idx%p.w, cur.idx/p.w
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					if dx == 0 && dy == 0 {
+						continue
+					}
+					nx, ny := cx+dx, cy+dy
+					if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+						continue
+					}
+					nidx := ny*p.w + nx
+					if p.buf[nidx] <= 0 || seen[nidx] {
+						continue
+					}
+					seen[nidx] = true
+					if jj, ok := juncIdxOf[nidx]; ok && jj != ji {
+						union(ji, jj)
+					}
+					queue = append(queue, bfsItem{nidx, cur.d + 1})
+				}
+			}
+		}
+	}
+
+	// Step 3: group junctions by union-find root.
+	groups := make(map[int][]int)
+	for i := range juncList {
+		r := find(i)
+		groups[r] = append(groups[r], i)
+	}
+
+	// Step 4: For each group, build the cluster pixel set as the
+	// junctions plus the shortest skeleton path between every pair of
+	// merged junctions, then derive centroid and exits.
+	for _, members := range groups {
+		clusterIdx := make(map[int]image.Point)
+		for _, mi := range members {
+			pt := juncList[mi]
+			clusterIdx[pt.Y*p.w+pt.X] = pt
+		}
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				path := bfsShortestPath(p, juncList[members[i]], juncList[members[j]], junctionMergeDist)
+				for _, pt := range path {
+					clusterIdx[pt.Y*p.w+pt.X] = pt
+				}
+			}
+		}
+		exitMap := make(map[int]image.Point)
+		for _, pt := range clusterIdx {
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					if dx == 0 && dy == 0 {
+						continue
+					}
+					nx, ny := pt.X+dx, pt.Y+dy
+					if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+						continue
+					}
+					nidx := ny*p.w + nx
+					if _, in := clusterIdx[nidx]; in {
+						continue
+					}
+					if p.buf[nidx] > 0 {
+						exitMap[nidx] = image.Point{X: nx, Y: ny}
+					}
+				}
+			}
+		}
+		var pix []image.Point
+		for _, pt := range clusterIdx {
+			pix = append(pix, pt)
+		}
+		if len(exitMap) != 4 {
+			unresolvable = append(unresolvable, pix...)
+			continue
+		}
+		var sumX, sumY float64
+		for _, pt := range pix {
+			sumX += float64(pt.X)
+			sumY += float64(pt.Y)
+		}
+		cl := junctionCluster{
+			pixels:   pix,
+			centroid: fPoint{sumX / float64(len(pix)), sumY / float64(len(pix))},
+		}
+		for _, ex := range exitMap {
+			cl.exits = append(cl.exits, ex)
+		}
+		resolvable = append(resolvable, cl)
+	}
+	return resolvable, unresolvable
+}
+
+// bfsShortestPath returns the shortest 8-connected skeleton path from
+// src to dst (inclusive of both endpoints), bounded by maxDist hops.
+// Returns nil if no path exists within the bound. Used to identify the
+// bridging skeleton pixels that join two junction clusters in a bowtie
+// pattern, so those pixels can be absorbed into the merged cluster.
+func bfsShortestPath(p *pixbuf, src, dst image.Point, maxDist int) []image.Point {
+	type node struct{ idx, parent int }
+	startIdx := src.Y*p.w + src.X
+	dstIdx := dst.Y*p.w + dst.X
+	if startIdx == dstIdx {
+		return []image.Point{src}
+	}
+	nodes := []node{{startIdx, -1}}
+	dist := map[int]int{startIdx: 0}
+	for h := 0; h < len(nodes); h++ {
+		cur := nodes[h]
+		d := dist[cur.idx]
+		if d >= maxDist {
+			continue
+		}
+		cx, cy := cur.idx%p.w, cur.idx/p.w
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				if dx == 0 && dy == 0 {
+					continue
+				}
+				nx, ny := cx+dx, cy+dy
+				if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+					continue
+				}
+				nidx := ny*p.w + nx
+				if p.buf[nidx] <= 0 {
+					continue
+				}
+				if _, seen := dist[nidx]; seen {
+					continue
+				}
+				dist[nidx] = d + 1
+				nodes = append(nodes, node{nidx, h})
+				if nidx == dstIdx {
+					var path []image.Point
+					for ci := len(nodes) - 1; ci >= 0; ci = nodes[ci].parent {
+						idx := nodes[ci].idx
+						path = append(path, image.Point{X: idx % p.w, Y: idx / p.w})
+					}
+					return path
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // convertImage runs the full knotfolio-style pipeline on img and returns
@@ -664,8 +908,9 @@ func convertImage(img image.Image) (*Diagram, error) {
 	p := binaryFromImage(img)
 	p.thin()
 	p.deleteSpurs()
-	if js := p.junctions(); len(js) > 0 {
-		return nil, &FusedJunctionsError{Junctions: js}
+	clusters, unresolvable := findJunctionClusters(p)
+	if len(unresolvable) > 0 {
+		return nil, &FusedJunctionsError{Junctions: unresolvable}
 	}
 
 	thick := p.clone()
@@ -693,6 +938,17 @@ func convertImage(img image.Image) (*Diagram, error) {
 		}
 		for _, pr := range pairs {
 			matches = append(matches, [2]image.Point{eps[pr[0]], eps[pr[1]]})
+		}
+	}
+
+	// Erase resolved junction clusters from p so the walker sees their
+	// exit pixels as fresh endpoints. We do this AFTER findEndpoints /
+	// matchEndpoints so the natural under-strand bridge matching isn't
+	// fooled by the new exit endpoints. The cluster's centroid vertex
+	// and four stub edges are spliced in after walkPath completes.
+	for _, cl := range clusters {
+		for _, pt := range cl.pixels {
+			p.buf[pt.Y*p.w+pt.X] = 0
 		}
 	}
 
@@ -824,6 +1080,25 @@ func convertImage(img image.Image) (*Diagram, error) {
 		edges = append(edges, newEdges...)
 		for i := 0; i+1 < len(seg); i++ {
 			edges = append(edges, convEdge{seg[i], seg[i+1], false})
+		}
+	}
+
+	// Splice each resolved junction cluster as a single 4-valent vertex:
+	// add the centroid as a new vertex, then add four straight stub edges
+	// to the four exit-endpoints that walkPath produced. The stubs are
+	// emitted with over=true so all four darts at the centroid carry
+	// Endpoint.Over=true — the switch tool detects that 0/4 imbalance as
+	// "ambiguous" and lets the user randomly assign the over-strand on
+	// first click.
+	for _, cl := range clusters {
+		centID := len(verts)
+		verts = append(verts, cl.centroid)
+		for _, ex := range cl.exits {
+			exID := findVertID(verts, fpt(ex))
+			if exID < 0 {
+				return nil, fmt.Errorf("ambiguous-crossing exit (%d,%d) missing from skeleton verts", ex.X, ex.Y)
+			}
+			edges = append(edges, convEdge{centID, exID, true})
 		}
 	}
 
