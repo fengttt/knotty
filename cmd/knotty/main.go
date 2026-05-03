@@ -31,10 +31,11 @@ import (
 )
 
 const (
-	// 9:16 portrait — the top pane is a full-width windowWidth × windowWidth
-	// square (the knot diagram) and the rest scrolls underneath it.
-	windowWidth  = 540
-	windowHeight = 960
+	// 16:9 landscape — the left pane is a full-height windowHeight ×
+	// windowHeight square (the knot diagram) and the info pane fills the
+	// rest of the width on the right.
+	windowWidth  = 960
+	windowHeight = 540
 )
 
 // styleEntry is one of the five image types, shown in the dropdown.
@@ -151,14 +152,14 @@ func main() {
 }
 
 // Layout is called by Ebiten with the current logical screen size. We
-// use it as a hook to resize the top image cell to match the window
-// width so the square picture area always fills the full width.
+// use it as a hook to resize the left image cell to match the window
+// height so the square picture area always fills the full height.
 func (g *game) Layout(outW, outH int) (int, int) {
 	if g.imageWidget != nil {
 		w := g.imageWidget.GetWidget()
-		if w.MinWidth != outW {
-			w.MinWidth = outW
-			w.MinHeight = outW
+		if w.MinHeight != outH {
+			w.MinWidth = outH
+			w.MinHeight = outH
 			if g.root != nil {
 				g.root.RequestRelayout()
 			}
@@ -183,19 +184,19 @@ func (g *game) Draw(screen *ebiten.Image) {
 
 // buildUI constructs the full UI tree.
 //
-// Layout (9:16 portrait):
+// Layout (16:9 landscape):
 //
-//	root (grid 1 col, 2 rows; top fixed square, bottom stretched):
-//	├─ topPane: [full-width square image]
-//	└─ bottomPane: [search row + style][name][scrolling properties]
+//	root (grid 2 cols, 1 row; left fixed square, right stretched):
+//	├─ leftPane: [full-height square image]
+//	└─ rightPane: [search row + style][name][scrolling properties]
 func (g *game) buildUI() *ebitenui.UI {
 	root := widget.NewContainer(
 		widget.ContainerOpts.BackgroundImage(uiimage.NewNineSliceColor(color.NRGBA{0x1a, 0x1a, 0x1a, 0xff})),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
-			widget.GridLayoutOpts.Columns(1),
-			// Top row sized by content (a windowWidth-side square);
-			// bottom row stretches to fill remaining vertical space.
-			widget.GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
+			widget.GridLayoutOpts.Columns(2),
+			// Left column sized by content (a windowHeight-side square);
+			// right column stretches to fill remaining horizontal space.
+			widget.GridLayoutOpts.Stretch([]bool{false, true}, []bool{true}),
 		)),
 	)
 
@@ -221,16 +222,16 @@ func (g *game) buildTopPane() *widget.Container {
 
 	top.AddChild(g.buildDrawToolbar())
 
-	// Full-width square: the image cell's MinWidth / MinHeight are updated
+	// Full-height square: the image cell's MinWidth / MinHeight are updated
 	// every frame in game.Layout so the square follows the current window
-	// width. The initial MinSize is just the starting window width so the
+	// height. The initial MinSize is just the starting window height so the
 	// first frame renders correctly.
 	g.imageWidget = newScaledImage(
 		widget.WidgetOpts.LayoutData(widget.GridLayoutData{
 			HorizontalPosition: widget.GridLayoutPositionStart,
 			VerticalPosition:   widget.GridLayoutPositionStart,
 		}),
-		widget.WidgetOpts.MinSize(windowWidth, windowWidth),
+		widget.WidgetOpts.MinSize(windowHeight, windowHeight),
 	)
 	g.imageWidget.DebugFace = g.face
 	g.imageWidget.DrawEnabled = true
@@ -765,7 +766,7 @@ func (g *game) initCanvas() {
 	if g.imageWidget == nil {
 		return
 	}
-	canvas := ebiten.NewImage(windowWidth, windowWidth)
+	canvas := ebiten.NewImage(windowHeight, windowHeight)
 	canvas.Fill(canvasBG)
 	g.imageWidget.Image = canvas
 }
