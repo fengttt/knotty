@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -307,4 +308,113 @@ func formatPD(pd [][4]int) string {
 		parts[i] = fmt.Sprintf("X[%d,%d,%d,%d]", e[0], e[1], e[2], e[3])
 	}
 	return strings.Join(parts, ", ")
+}
+
+// parseJonesPoly parses a Jones polynomial in the loose KnotInfo
+// format — terms separated by + or -, each term `[<coef>][t[^<exp>]]`
+// where exp is either a bare positive integer (`t^3`) or
+// parenthesized for negative or signed values (`t^(-3)`).
+// Whitespace is ignored. Empty input parses to the zero polynomial.
+//
+// Used by the wide knot-database comparison test to put dataset
+// strings into the same poly representation our pipeline produces,
+// so structural comparison (with optional mirror) is straightforward.
+func parseJonesPoly(s string) (poly, error) {
+	clean := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, s)
+	out := poly{}
+	if clean == "" {
+		return out, nil
+	}
+	i := 0
+	for i < len(clean) {
+		sign := 1
+		switch clean[i] {
+		case '+':
+			i++
+		case '-':
+			sign = -1
+			i++
+		}
+		// Optional unsigned coefficient.
+		coefStart := i
+		for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
+			i++
+		}
+		coef := 1
+		hadCoef := i > coefStart
+		if hadCoef {
+			n, err := strconv.Atoi(clean[coefStart:i])
+			if err != nil {
+				return nil, fmt.Errorf("parseJonesPoly: bad coef at %d: %v", coefStart, err)
+			}
+			coef = n
+		}
+		// Optional variable t with optional exponent.
+		exp := 0
+		hadVar := false
+		if i < len(clean) && clean[i] == 't' {
+			hadVar = true
+			i++
+			exp = 1
+			if i < len(clean) && clean[i] == '^' {
+				i++
+				if i < len(clean) && clean[i] == '(' {
+					end := strings.IndexByte(clean[i:], ')')
+					if end < 0 {
+						return nil, fmt.Errorf("parseJonesPoly: unmatched '(' at %d", i)
+					}
+					n, err := strconv.Atoi(clean[i+1 : i+end])
+					if err != nil {
+						return nil, fmt.Errorf("parseJonesPoly: bad exp at %d: %v", i, err)
+					}
+					exp = n
+					i += end + 1
+				} else {
+					expStart := i
+					if i < len(clean) && (clean[i] == '+' || clean[i] == '-') {
+						i++
+					}
+					for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
+						i++
+					}
+					if i == expStart {
+						return nil, fmt.Errorf("parseJonesPoly: missing exp at %d", expStart)
+					}
+					n, err := strconv.Atoi(clean[expStart:i])
+					if err != nil {
+						return nil, fmt.Errorf("parseJonesPoly: bad exp at %d: %v", expStart, err)
+					}
+					exp = n
+				}
+			}
+		}
+		if !hadCoef && !hadVar {
+			return nil, fmt.Errorf("parseJonesPoly: empty term at %d in %q", i, clean)
+		}
+		out[exp] += sign * coef
+	}
+	for k, v := range out {
+		if v == 0 {
+			delete(out, k)
+		}
+	}
+	return out, nil
+}
+
+// mirrorPoly returns p with every exponent negated, i.e. the
+// substitution t → 1/t. For knots, V_K(1/t) is the Jones polynomial
+// of the mirror knot; the wide DB-comparison test accepts either
+// V(t) or V(1/t) since the converted image's chirality is not
+// guaranteed to match the dataset's canonical chirality.
+func mirrorPoly(p poly) poly {
+	out := poly{}
+	for k, v := range p {
+		out[-k] = v
+	}
+	return out
 }

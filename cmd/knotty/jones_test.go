@@ -142,3 +142,55 @@ func TestFormatPD(t *testing.T) {
 		}
 	}
 }
+
+// TestParseJonesPolyDatasetFormat round-trips strings that mimic the
+// dataset's storage format — irregular whitespace, parenthesized
+// negative exponents, mixed leading sign — and the format formatPoly
+// itself emits. The wide TestJonesAgainstDatabase test depends on
+// this parser; if it ever drops a term silently we want to know
+// from a focused unit test, not a flood of "Jones mismatch" lines.
+func TestParseJonesPolyDatasetFormat(t *testing.T) {
+	cases := []struct {
+		in   string
+		want poly
+	}{
+		{"", poly{}},
+		{"1", poly{0: 1}},
+		{"-1", poly{0: -1}},
+		{"t", poly{1: 1}},
+		{"-t", poly{1: -1}},
+		{"t^3", poly{3: 1}},
+		{"t^(-3)", poly{-3: 1}},
+		{"2t^3", poly{3: 2}},
+		{"-3t^(-2)", poly{-2: -3}},
+		// 4_1's dataset format with quirky spacing.
+		{"t^(-2)-t^(-1)+ 1-t+ t^2", poly{-2: 1, -1: -1, 0: 1, 1: -1, 2: 1}},
+		// The format we ourselves emit, with consistent spacing.
+		{"t^(-2) - t^(-1) + 1 - t + t^2", poly{-2: 1, -1: -1, 0: 1, 1: -1, 2: 1}},
+		// Right-handed trefoil.
+		{"-t^4+t^3+t", poly{4: -1, 3: 1, 1: 1}},
+		// Bare-positive exponent (no parens).
+		{"t^2-t+1", poly{2: 1, 1: -1, 0: 1}},
+	}
+	for _, c := range cases {
+		got, err := parseJonesPoly(c.in)
+		if err != nil {
+			t.Errorf("parseJonesPoly(%q): %v", c.in, err)
+			continue
+		}
+		if !polyEqual(got, c.want) {
+			t.Errorf("parseJonesPoly(%q) = %v want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestMirrorPoly verifies mirrorPoly negates exponents correctly —
+// the wide test relies on this for chirality-tolerant Jones
+// comparison.
+func TestMirrorPoly(t *testing.T) {
+	in := poly{-4: -1, -3: 1, -1: 1}    // V(left trefoil)
+	want := poly{4: -1, 3: 1, 1: 1}     // V(right trefoil) = V_left(1/t)
+	if got := mirrorPoly(in); !polyEqual(got, want) {
+		t.Errorf("mirrorPoly(%v) = %v want %v", in, got, want)
+	}
+}
