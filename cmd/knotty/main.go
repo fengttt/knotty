@@ -1235,9 +1235,10 @@ func (g *game) doConvert() {
 			i, a.Start.Crossing, overLabel(a.Start.Over), a.End.Crossing, overLabel(a.End.Over), len(a.Polyline))
 	}
 	// When the converted diagram is a knot (a single component),
-	// also emit its PD code and Jones polynomial. Both are computed
-	// from the dart graph; failures degrade to a one-line message
-	// so a malformed diagram doesn't suppress the basic summary.
+	// also emit its PD code, DT code, and Jones polynomial. All are
+	// computed from the dart graph; failures degrade to a one-line
+	// message so a malformed diagram doesn't suppress the basic
+	// summary.
 	if nc, err := d.NumComponents(); err == nil && nc == 1 {
 		fmt.Fprintf(&b, "\ncomponents: 1 (knot)\n")
 		if pd, err := d.PD(); err == nil {
@@ -1248,6 +1249,11 @@ func (g *game) doConvert() {
 			fmt.Fprintf(&b, "PD: %s\n", formatPD(canonicalPD(pd)))
 		} else {
 			fmt.Fprintf(&b, "PD: (%v)\n", err)
+		}
+		if dt, err := d.DT(); err == nil {
+			fmt.Fprintf(&b, "DT: %s\n", formatDT(dt))
+		} else {
+			fmt.Fprintf(&b, "DT: (%v)\n", err)
 		}
 		if jp, err := d.Jones(); err == nil {
 			fmt.Fprintf(&b, "Jones: V(t) = %s\n", jp)

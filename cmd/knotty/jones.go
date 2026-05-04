@@ -141,38 +141,60 @@ func addDeltaPower(p poly, shift, k int) {
 	}
 }
 
-// writhe returns the sum of crossing signs.
+// writhe returns the sum of crossing signs under a consistent knot
+// orientation.
 //
-// At each crossing the under and over strands each have one
-// "incoming" dart (negative-signed at this vertex; the dart points
-// back toward the strand's earlier position) and one "outgoing"
-// dart. With CCW adj order placing under at positions 0/2 and over
-// at positions 1/3, the cross product of the two strand directions
-// is +1 iff over_in_pos == (under_in_pos + 3) mod 4, else -1.
+// At each crossing, assign each strand a direction by walking the knot
+// (one dartCircuit per component) and recording which adj position the
+// walk ENTERS the crossing through. Under at adj positions 0/2 and
+// over at 1/3, so each crossing has one "under-in" position and one
+// "over-in" position. With CCW adj order (positions advancing 90° CCW
+// around the crossing), the crossing is positive iff over_in is one
+// CCW step BEHIND under_in (i.e. over_in == (under_in+3) mod 4),
+// otherwise negative. Working through the four cases shows this
+// matches the standard right-hand-rule sign.
 //
-// Rationale: position the crossing so adj[k] points at angle
-// k*90° CCW. Then under-strand direction is from under_in's
-// position toward the diametrically-opposite under_out (the strand
-// passes straight through). Over-strand direction is the same idea
-// for positions 1/3. Working out the four cases gives the formula
-// above.
+// The dart-sign trick (d<0 ⇒ "incoming") used previously was wrong:
+// dart sign reflects arbitrary arc enumeration order during
+// convertImage, not knot orientation, so most crossings ended up with
+// only an under-in OR an over-in detected and got silently skipped.
 func (g *dartGraph) writhe() int {
-	w := 0
-	for _, ad := range g.adj {
-		underIn, overIn := -1, -1
-		for i, d := range ad {
-			if d < 0 {
-				if i%2 == 0 {
-					underIn = i
-				} else {
-					overIn = i
+	c := len(g.diagram.Crossings)
+	if c == 0 {
+		return 0
+	}
+	type inPos struct{ under, over int }
+	in := make([]inPos, c)
+	for i := range in {
+		in[i].under, in[i].over = -1, -1
+	}
+	// Walk every component so each dart is visited exactly once.
+	seen := make([]bool, len(g.diagram.Arcs))
+	for ai := range g.diagram.Arcs {
+		if seen[ai] {
+			continue
+		}
+		for _, d := range g.dartCircuit(ai + 1) {
+			seen[absi(d)-1] = true
+			v := g.dartEnd(d)
+			for k, dd := range g.adj[v] {
+				if dd == -d {
+					if k%2 == 0 {
+						in[v].under = k
+					} else {
+						in[v].over = k
+					}
+					break
 				}
 			}
 		}
-		if underIn < 0 || overIn < 0 {
+	}
+	w := 0
+	for _, p := range in {
+		if p.under < 0 || p.over < 0 {
 			continue
 		}
-		if overIn == (underIn+3)%4 {
+		if p.over == (p.under+3)%4 {
 			w++
 		} else {
 			w--
@@ -310,6 +332,16 @@ func formatPD(pd [][4]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// formatDT renders a DT code as a space-separated sequence of signed
+// even integers, matching the Knotscape / KnotInfo convention.
+func formatDT(dt []int) string {
+	parts := make([]string, len(dt))
+	for i, n := range dt {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, " ")
+}
+
 // parseJonesPoly parses a Jones polynomial in the loose KnotInfo
 // format — terms separated by + or -, each term `[<coef>][t[^<exp>]]`
 // where exp is either a bare positive integer (`t^3`) or
@@ -353,6 +385,11 @@ func parseJonesPoly(s string) (poly, error) {
 				return nil, fmt.Errorf("parseJonesPoly: bad coef at %d: %v", coefStart, err)
 			}
 			coef = n
+		}
+		// KnotInfo writes `3*t^(-8)` with an explicit multiplication
+		// sign between coefficient and variable; skip it.
+		if hadCoef && i < len(clean) && clean[i] == '*' {
+			i++
 		}
 		// Optional variable t with optional exponent.
 		exp := 0
