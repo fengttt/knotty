@@ -1234,6 +1234,31 @@ func (g *game) doConvert() {
 		fmt.Fprintf(&b, "  A%d: C%d(%s) -> C%d(%s), %d pts\n",
 			i, a.Start.Crossing, overLabel(a.Start.Over), a.End.Crossing, overLabel(a.End.Over), len(a.Polyline))
 	}
+	// When the converted diagram is a knot (a single component),
+	// also emit its PD code and Jones polynomial. Both are computed
+	// from the dart graph; failures degrade to a one-line message
+	// so a malformed diagram doesn't suppress the basic summary.
+	if nc, err := d.NumComponents(); err == nil && nc == 1 {
+		fmt.Fprintf(&b, "\ncomponents: 1 (knot)\n")
+		if pd, err := d.PD(); err == nil {
+			// Print the canonical PD (lex-smallest over all
+			// start_dart choices) so the displayed code matches what
+			// KnotInfo and our wide test compare against, regardless
+			// of which arc index the walk happened to start at.
+			fmt.Fprintf(&b, "PD: %s\n", formatPD(canonicalPD(pd)))
+		} else {
+			fmt.Fprintf(&b, "PD: (%v)\n", err)
+		}
+		if jp, err := d.Jones(); err == nil {
+			fmt.Fprintf(&b, "Jones: V(t) = %s\n", jp)
+		} else {
+			fmt.Fprintf(&b, "Jones: (%v)\n", err)
+		}
+	} else if err == nil {
+		fmt.Fprintf(&b, "\ncomponents: %d (link, Jones not computed)\n", nc)
+	} else {
+		fmt.Fprintf(&b, "\ncomponents: (%v)\n", err)
+	}
 	g.propsArea.SetText(b.String())
 }
 
