@@ -1260,6 +1260,11 @@ func (g *game) doConvert() {
 		} else {
 			fmt.Fprintf(&b, "Jones: (%v)\n", err)
 		}
+		if hp, err := d.HOMFLY(); err == nil {
+			fmt.Fprintf(&b, "HOMFLY: P(a,z) = %s\n", hp)
+		} else {
+			fmt.Fprintf(&b, "HOMFLY: (%v)\n", err)
+		}
 	} else if err == nil {
 		fmt.Fprintf(&b, "\ncomponents: %d (link, Jones not computed)\n", nc)
 	} else {
