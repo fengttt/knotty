@@ -39,6 +39,9 @@ dataset/*
 !dataset/*.xlsx
 # Re-include the zipped knot_info JSON tracked via LFS.
 !dataset/knot_info.json.zip
+# Re-include the Thistlethwaite link table (links.json + per-link GIFs).
+!dataset/links/
+!dataset/links/**
 # Local-only working file; not tracked.
 dataset/knot_polys.xlsx
 
