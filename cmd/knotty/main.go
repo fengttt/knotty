@@ -272,39 +272,47 @@ func (g *game) buildDrawToolbar() *widget.Container {
 		)),
 	)
 
-	row.AddChild(iconButton(beautifyIcon(), func() {
+	row.AddChild(iconButton(beautifyIcon(), g.tip("Beautify: redraw the current knot in a clean style"), func() {
 		g.doBeautify()
 	}))
-	row.AddChild(iconButton(undoIcon(), func() {
+	row.AddChild(iconButton(undoIcon(), g.tip("Undo the last beautify"), func() {
 		g.doUndo()
 	}))
-	row.AddChild(iconButton(pencilIcon(), func() {
+	row.AddChild(iconButton(pencilIcon(), g.tip("Pencil: free-hand draw on the canvas"), func() {
 		g.imageWidget.Tool = ToolPencil
 	}))
-	row.AddChild(iconButton(eraserIcon(), func() {
+	row.AddChild(iconButton(eraserIcon(), g.tip("Eraser: erase strokes from the canvas"), func() {
 		g.imageWidget.Tool = ToolEraser
 	}))
-	row.AddChild(iconButton(moveIcon(), func() {
+	row.AddChild(iconButton(moveIcon(), g.tip("Move: drag a point along an arc"), func() {
 		g.imageWidget.Tool = ToolMove
 	}))
-	row.AddChild(iconButton(reidemeisterIcon(), func() {
+	row.AddChild(iconButton(reidemeisterIcon(), g.tip("Reidemeister: lasso a region to apply an R-move"), func() {
 		g.imageWidget.Tool = ToolReidemeister
 	}))
-	row.AddChild(iconButton(switchIcon(), func() {
+	row.AddChild(iconButton(switchIcon(), g.tip("Switch: flip the over/under at a crossing"), func() {
 		g.imageWidget.Tool = ToolSwitch
+	}))
+	row.AddChild(iconButton(colorArcIcon(), g.tip("Color arc: click an arc to paint it the current pencil color"), func() {
+		g.imageWidget.Tool = ToolColor
 	}))
 	row.AddChild(g.buildColorCombo())
 	return row
 }
 
 // iconButton is a 36×32 toolbar button whose face is a single icon
-// image, with a small inset around the glyph.
-func iconButton(icon *ebiten.Image, onClick func()) *widget.Button {
+// image, with a small inset around the glyph. If tip is non-nil, it is
+// shown as a tooltip when the cursor hovers over the button.
+func iconButton(icon *ebiten.Image, tip *widget.ToolTip, onClick func()) *widget.Button {
+	widgetOpts := []widget.WidgetOpt{
+		widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
+		widget.WidgetOpts.MinSize(36, 32),
+	}
+	if tip != nil {
+		widgetOpts = append(widgetOpts, widget.WidgetOpts.ToolTip(tip))
+	}
 	return widget.NewButton(
-		widget.ButtonOpts.WidgetOpts(
-			widget.WidgetOpts.LayoutData(widget.RowLayoutData{Position: widget.RowLayoutPositionCenter}),
-			widget.WidgetOpts.MinSize(36, 32),
-		),
+		widget.ButtonOpts.WidgetOpts(widgetOpts...),
 		widget.ButtonOpts.Image(buttonImage()),
 		widget.ButtonOpts.Graphic(&widget.GraphicImage{Idle: icon}),
 		widget.ButtonOpts.GraphicPadding(widget.Insets{Left: 4, Right: 4, Top: 4, Bottom: 4}),
@@ -312,6 +320,16 @@ func iconButton(icon *ebiten.Image, onClick func()) *widget.Button {
 			onClick()
 		}),
 	)
+}
+
+// tip builds a text tooltip with knotty's standard styling. Returns nil
+// for an empty label so iconButton can skip attaching a tooltip.
+func (g *game) tip(label string) *widget.ToolTip {
+	if label == "" {
+		return nil
+	}
+	bg := uiimage.NewNineSliceColor(color.NRGBA{0x2a, 0x2a, 0x32, 0xee})
+	return widget.NewTextToolTip(label, &g.face, color.NRGBA{240, 240, 240, 255}, bg)
 }
 
 // buildColorCombo builds the pencil-color trigger. The button face is
@@ -363,7 +381,7 @@ func (g *game) toggleColorPopup() {
 	// capture this variable so they can close the popup on selection.
 	var closeFn widget.RemoveWindowFunc
 	for i, e := range colorEntries {
-		contents.AddChild(iconButton(colorSwatchIcon(e.c), func() {
+		contents.AddChild(iconButton(colorSwatchIcon(e.c), nil, func() {
 			g.colorIndex = i
 			g.imageWidget.BrushColor = e.c
 			g.imageWidget.Tool = ToolPencil
@@ -525,7 +543,7 @@ func (g *game) buildSearchRow() *widget.Container {
 	)
 	row1.AddChild(searchBtn)
 
-	row1.AddChild(iconButton(saveIcon(), func() {
+	row1.AddChild(iconButton(saveIcon(), g.tip("Save the current canvas as a PNG"), func() {
 		g.doSave()
 	}))
 

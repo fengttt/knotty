@@ -166,6 +166,28 @@ func moveIcon() *ebiten.Image {
 	return img
 }
 
+// colorArcIcon draws a stylized brush stroke (a thick wavy line in
+// rainbow segments) — the toolbar glyph for ToolColor, which paints
+// an arc with the current pencil color on click.
+func colorArcIcon() *ebiten.Image {
+	img := ebiten.NewImage(iconSize, iconSize)
+	const stroke = float32(3)
+	segs := []struct {
+		x1, y1, x2, y2 float32
+		c              color.NRGBA
+	}{
+		{4, 18, 9, 10, color.NRGBA{0xd0, 0x40, 0x40, 0xff}},
+		{9, 10, 15, 14, color.NRGBA{0x40, 0xa0, 0x40, 0xff}},
+		{15, 14, 20, 6, color.NRGBA{0x40, 0x60, 0xd0, 0xff}},
+	}
+	for _, s := range segs {
+		vector.StrokeLine(img, s.x1, s.y1, s.x2, s.y2, stroke, s.c, true)
+		vector.FillCircle(img, s.x1, s.y1, stroke/2, s.c, true)
+		vector.FillCircle(img, s.x2, s.y2, stroke/2, s.c, true)
+	}
+	return img
+}
+
 // colorSwatchIcon draws a single filled circle in the given color with
 // a thin dark border so light colors (yellow) stay visible against the
 // button background.

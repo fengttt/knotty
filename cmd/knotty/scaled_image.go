@@ -47,6 +47,10 @@ const (
 	// host re-renders the canvas via OnDiagramChanged so the visible
 	// over/under reads the new way around.
 	ToolSwitch = 4
+	// ToolColor listens for a single click on (or near) an arc and
+	// recolors that arc with the current BrushColor. The host
+	// re-renders the canvas via OnDiagramChanged.
+	ToolColor = 5
 )
 
 // scaledImage is a minimal ebitenui widget that draws an *ebiten.Image
@@ -110,6 +114,10 @@ type scaledImage struct {
 	// not-pressed → pressed transition) rather than every frame the
 	// pointer is held.
 	switchPressed bool
+
+	// colorPressed tracks the press state for ToolColor, same once-per-
+	// click pattern as switchPressed.
+	colorPressed bool
 
 	// DebugCrossings are points in the source image's pixel coordinates
 	// to overlay as circles (used by the Debug button). Coordinates are
@@ -229,21 +237,31 @@ func (s *scaledImage) Update(updObj *widget.UpdateObject) {
 		s.drawing = false
 		s.lassoReset()
 		s.switchPressed = false
+		s.colorPressed = false
 		s.handleDragging()
 	case ToolReidemeister:
 		s.drawing = false
 		s.drag.reset()
 		s.switchPressed = false
+		s.colorPressed = false
 		s.handleLasso()
 	case ToolSwitch:
 		s.drawing = false
 		s.drag.reset()
 		s.lassoReset()
+		s.colorPressed = false
 		s.handleSwitch()
+	case ToolColor:
+		s.drawing = false
+		s.drag.reset()
+		s.lassoReset()
+		s.switchPressed = false
+		s.handleColor()
 	default:
 		s.drag.reset()
 		s.lassoReset()
 		s.switchPressed = false
+		s.colorPressed = false
 		s.handleDrawing()
 	}
 }
@@ -453,6 +471,74 @@ func (s *scaledImage) handleSwitch() {
 	}
 }
 
+
+// handleColor fires once on each not-pressed → pressed transition while
+// ToolColor is active. On click it finds the arc closest to the cursor
+// (within a small pixel radius) and sets that arc's Color to the
+// current BrushColor, then re-renders via OnDiagramChanged.
+func (s *scaledImage) handleColor() {
+	if s.Image == nil || s.Diagram == nil {
+		return
+	}
+	mx, my, pressed, _ := primaryPointer()
+	if !pressed {
+		s.colorPressed = false
+		return
+	}
+	if s.colorPressed {
+		return
+	}
+	s.colorPressed = true
+
+	ib := s.Image.Bounds()
+	iw, ih := ib.Dx(), ib.Dy()
+	rw, rh := s.widget.Rect.Dx(), s.widget.Rect.Dy()
+	if iw <= 0 || ih <= 0 || rw <= 0 || rh <= 0 {
+		return
+	}
+	sx := float64(rw) / float64(iw)
+	sy := float64(rh) / float64(ih)
+	scale := sx
+	if sy < sx {
+		scale = sy
+	}
+	dw := float64(iw) * scale
+	dh := float64(ih) * scale
+	ox := float64(s.widget.Rect.Min.X) + (float64(rw)-dw)/2
+	oy := float64(s.widget.Rect.Min.Y) + (float64(rh)-dh)/2
+	px := (mx - ox) / scale
+	py := (my - oy) / scale
+	if px < 0 || py < 0 || px >= float64(iw) || py >= float64(ih) {
+		return
+	}
+
+	const hitRadius = 24.0
+	bestD2 := hitRadius * hitRadius
+	nearest := -1
+	cursor := imagePointF{X: px, Y: py}
+	for i := range s.Diagram.Arcs {
+		d2, _ := nearestOnPolyline(s.Diagram.Arcs[i].Polyline, cursor)
+		if d2 < bestD2 {
+			bestD2 = d2
+			nearest = i
+		}
+	}
+	if nearest < 0 {
+		return
+	}
+	bc, ok := s.BrushColor.(color.NRGBA)
+	if !ok {
+		r, g, b, a := s.BrushColor.RGBA()
+		bc = color.NRGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}
+	}
+	if bc.A == 0 {
+		bc.A = 0xff
+	}
+	s.Diagram.Arcs[nearest].Color = bc
+	if s.OnDiagramChanged != nil {
+		s.OnDiagramChanged()
+	}
+}
 
 // handleDragging routes pointer input into the drag state machine.
 // Only called when Tool == ToolMove, so it doesn't need to coexist

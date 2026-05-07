@@ -1,6 +1,9 @@
 package main
 
-import "image"
+import (
+	"image"
+	"image/color"
+)
 
 // Endpoint is an arc's connection to a crossing: which crossing it meets
 // and whether the arc is the over-strand (true) or under-strand (false)
@@ -11,11 +14,14 @@ type Endpoint struct {
 }
 
 // Arc is a polyline running between two crossings. Polyline[0] sits at
-// Start.Crossing, Polyline[len-1] at End.Crossing.
+// Start.Crossing, Polyline[len-1] at End.Crossing. Color is the per-arc
+// stroke color set via ToolColor; the zero value (alpha 0) means the
+// renderer uses its default stroke.
 type Arc struct {
 	Polyline []image.Point
 	Start    Endpoint
 	End      Endpoint
+	Color    color.NRGBA
 }
 
 // Diagram is the polyline-level knot diagram extracted from a raster image

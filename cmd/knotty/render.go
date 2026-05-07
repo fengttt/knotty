@@ -20,7 +20,7 @@ func renderDiagram(canvas *ebiten.Image, d *Diagram, bg color.Color) {
 	}
 	canvas.Fill(bg)
 
-	stroke := color.NRGBA{0x10, 0x10, 0x10, 0xff}
+	defaultStroke := color.NRGBA{0x10, 0x10, 0x10, 0xff}
 	const strokeW = float32(3.0)
 	const gapPx = 8.0
 	const chaikinIters = 3
@@ -28,6 +28,10 @@ func renderDiagram(canvas *ebiten.Image, d *Diagram, bg color.Color) {
 	for _, a := range d.Arcs {
 		smooth := smoothChaikin(a.Polyline, chaikinIters)
 		poly := trimPolylineEnds(smooth, !a.Start.Over, !a.End.Over, gapPx)
+		stroke := color.Color(defaultStroke)
+		if a.Color.A != 0 {
+			stroke = a.Color
+		}
 		strokeSmoothPolyline(canvas, poly, strokeW, stroke)
 	}
 	// Free-floating loops (no crossings, no over/under). Smooth as
@@ -39,7 +43,7 @@ func renderDiagram(canvas *ebiten.Image, d *Diagram, bg color.Color) {
 		}
 		closed := append(append([]image.Point(nil), lp...), lp[0])
 		smooth := smoothChaikin(closed, chaikinIters)
-		strokeSmoothPolyline(canvas, smooth, strokeW, stroke)
+		strokeSmoothPolyline(canvas, smooth, strokeW, defaultStroke)
 	}
 }
 
