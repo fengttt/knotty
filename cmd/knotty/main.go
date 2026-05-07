@@ -688,19 +688,24 @@ func isLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-// loadSavedKnot loads a previously-saved diagram from
-// saved/<name>.png, blits it onto the canvas, and triggers the same
-// pendingAttach flow as a knot_info load so Move and the
-// Reidemeister tool can run on it.
+// loadSavedKnot loads a previously-saved diagram from saved/<name>.png
+// (preferred) or saved/<name>.gif (fallback), blits it onto the canvas,
+// and triggers the same pendingAttach flow as a knot_info load so Move
+// and the Reidemeister tool can run on it.
 func (g *game) loadSavedKnot(name string) {
-	path := savedKnotPath(name)
+	path, kind, err := findSavedKnot(name)
+	if err != nil {
+		g.nameLabel.Label = name + " (not saved)"
+		g.propsArea.SetText(fmt.Sprintf("loadSavedKnot: %v\n", err))
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		g.nameLabel.Label = name + " (not saved)"
 		g.propsArea.SetText(fmt.Sprintf("loadSavedKnot: %v\n", err))
 		return
 	}
-	img, _, err := decodeKnotImage(data, knot.PNG)
+	img, _, err := decodeKnotImage(data, kind)
 	if err != nil {
 		g.propsArea.SetText(fmt.Sprintf("loadSavedKnot decode: %v\n", err))
 		return
@@ -719,9 +724,30 @@ func (g *game) loadSavedKnot(name string) {
 
 // savedKnotPath returns the on-disk path for a saved diagram named
 // `name`. Lives in saved/ at the repo root (a sibling of
-// cmd/knotty/).
+// cmd/knotty/). Save always writes PNG; load also accepts GIF (see
+// findSavedKnot).
 func savedKnotPath(name string) string {
 	return filepath.Join("saved", name+".png")
+}
+
+// findSavedKnot returns the existing on-disk path and image kind for a
+// saved diagram named `name`. Looks for saved/<name>.png first, then
+// saved/<name>.gif.
+func findSavedKnot(name string) (string, knot.ImageKind, error) {
+	candidates := []struct {
+		ext  string
+		kind knot.ImageKind
+	}{
+		{".png", knot.PNG},
+		{".gif", knot.GIF},
+	}
+	for _, c := range candidates {
+		path := filepath.Join("saved", name+c.ext)
+		if _, err := os.Stat(path); err == nil {
+			return path, c.kind, nil
+		}
+	}
+	return "", "", fmt.Errorf("no saved/%s.{png,gif} found", name)
 }
 
 // doSave snapshots the current canvas contents and writes them as a
@@ -1153,6 +1179,12 @@ func (g *game) doDebug() {
 		var fje *FusedJunctionsError
 		if errors.As(err, &fje) {
 			g.imageWidget.DebugJunctions = append([]stdimage.Point(nil), fje.Junctions...)
+			return
+		}
+		var bte *BadTopologyError
+		if errors.As(err, &bte) {
+			g.imageWidget.DebugJunctions = append([]stdimage.Point(nil), bte.Locations...)
+			g.propsArea.SetText(g.propsArea.GetText() + fmt.Sprintf("debug: %v\n", err))
 			return
 		}
 		g.propsArea.SetText(g.propsArea.GetText() + fmt.Sprintf("debug: convert failed: %v\n", err))

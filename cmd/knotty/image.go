@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	_ "image/gif"
 	_ "image/png"
 
 	"github.com/fengttt/knotty/knot"
@@ -26,10 +27,10 @@ func decodeKnotImage(data []byte, kind knot.ImageKind) (*ebiten.Image, image.Ima
 		return nil, nil, nil
 	}
 	switch kind {
-	case knot.PNG:
+	case knot.PNG, knot.GIF:
 		img, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
-			return nil, nil, fmt.Errorf("decode png: %w", err)
+			return nil, nil, fmt.Errorf("decode %s: %w", kind, err)
 		}
 		return ebiten.NewImageFromImage(img), img, nil
 	case knot.SVG:

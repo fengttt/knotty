@@ -20,12 +20,13 @@ const (
 )
 
 // ImageKind is the file format of an image: PNG for rasterized diagrams,
-// SVG for the grid diagram.
+// SVG for the grid diagram, GIF for user-saved animated/static GIFs.
 type ImageKind string
 
 const (
 	PNG ImageKind = "png"
 	SVG ImageKind = "svg"
+	GIF ImageKind = "gif"
 )
 
 // Column returns the knot_img column name that stores this ImageType.

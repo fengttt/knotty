@@ -657,6 +657,19 @@ func (e *FusedJunctionsError) Error() string {
 	return fmt.Sprintf("%d fused junctions in skeleton — cannot interpret", len(e.Junctions))
 }
 
+// BadTopologyError is returned when convert builds a graph that the arc
+// walker can't traverse: a self-loop edge or a vertex with degree
+// outside {1, 2, 4}. Locations are the offending vertex coordinates so
+// callers can highlight them in the UI.
+type BadTopologyError struct {
+	Locations []image.Point
+	Reason    string
+}
+
+func (e *BadTopologyError) Error() string {
+	return fmt.Sprintf("bad convert topology at %d location(s): %s", len(e.Locations), e.Reason)
+}
+
 // junctionCluster is one 8-connected group of skeleton junction pixels
 // (sameNeighbors > 2) that the convert pipeline has chosen to interpret
 // as a single 4-valent ambiguous crossing — a "solid X" with no detected
@@ -798,30 +811,76 @@ func findJunctionClusters(p *pixbuf) (resolvable []junctionCluster, unresolvable
 				}
 			}
 		}
-		exitMap := make(map[int]image.Point)
-		for _, pt := range clusterIdx {
-			for dy := -1; dy <= 1; dy++ {
-				for dx := -1; dx <= 1; dx++ {
-					if dx == 0 && dy == 0 {
-						continue
-					}
-					nx, ny := pt.X+dx, pt.Y+dy
-					if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
-						continue
-					}
-					nidx := ny*p.w + nx
-					if _, in := clusterIdx[nidx]; in {
-						continue
-					}
-					if p.buf[nidx] > 0 {
-						exitMap[nidx] = image.Point{X: nx, Y: ny}
+		// Absorb cells whose only skeleton neighbors are already inside
+		// the cluster — thinning a sharp ~90° corner often leaves a tiny
+		// 2-pixel diagonal junction with a single bridge cell between
+		// the diagonal pair. That bridge cell looks like a third "exit"
+		// even though it goes nowhere outside the cluster. Iterate until
+		// stable.
+		var exitMap map[int]image.Point
+		for {
+			exitMap = make(map[int]image.Point)
+			for _, pt := range clusterIdx {
+				for dy := -1; dy <= 1; dy++ {
+					for dx := -1; dx <= 1; dx++ {
+						if dx == 0 && dy == 0 {
+							continue
+						}
+						nx, ny := pt.X+dx, pt.Y+dy
+						if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+							continue
+						}
+						nidx := ny*p.w + nx
+						if _, in := clusterIdx[nidx]; in {
+							continue
+						}
+						if p.buf[nidx] > 0 {
+							exitMap[nidx] = image.Point{X: nx, Y: ny}
+						}
 					}
 				}
+			}
+			absorbed := false
+			for nidx, pt := range exitMap {
+				outCount := 0
+				for dy := -1; dy <= 1; dy++ {
+					for dx := -1; dx <= 1; dx++ {
+						if dx == 0 && dy == 0 {
+							continue
+						}
+						nx, ny := pt.X+dx, pt.Y+dy
+						if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+							continue
+						}
+						mIdx := ny*p.w + nx
+						if p.buf[mIdx] <= 0 {
+							continue
+						}
+						if _, in := clusterIdx[mIdx]; in {
+							continue
+						}
+						outCount++
+					}
+				}
+				if outCount == 0 {
+					clusterIdx[nidx] = pt
+					absorbed = true
+				}
+			}
+			if !absorbed {
+				break
 			}
 		}
 		var pix []image.Point
 		for _, pt := range clusterIdx {
 			pix = append(pix, pt)
+		}
+		// Clusters with ≤ 2 exits are not real junctions — they are
+		// thinning artifacts (e.g. a sharp corner) the walker can
+		// traverse as normal skeleton path. Leave them in p; they
+		// neither block convert nor splice in as crossings.
+		if len(exitMap) <= 2 {
+			continue
 		}
 		if len(exitMap) != 4 {
 			unresolvable = append(unresolvable, pix...)
@@ -842,6 +901,101 @@ func findJunctionClusters(p *pixbuf) (resolvable []junctionCluster, unresolvable
 		resolvable = append(resolvable, cl)
 	}
 	return resolvable, unresolvable
+}
+
+// relaxFusedJunctions erases each cluster pixel in `pix` plus a short
+// stretch of every arm leading out of it, turning a "fused" Y-junction
+// (a strand grazing another strand) into a clean gap that the standard
+// endpoint matcher can bridge across an over-strand. Returns true when
+// at least one pixel was erased.
+//
+// The walked stretch length is deliberately small (a few pixels): wide
+// enough to disambiguate the touch-point geometry, narrow enough that
+// the resulting endpoints stay close to the original junction so the
+// later under-strand match doesn't drift. Pixels that already lie on a
+// (now-disconnected) endpoint are not extended further — that endpoint
+// is already where matchEndpoints needs it.
+func relaxFusedJunctions(p *pixbuf, pix []image.Point) bool {
+	if len(pix) == 0 {
+		return false
+	}
+	const armErase = 3
+	cluster := make(map[int]bool, len(pix))
+	for _, pt := range pix {
+		cluster[pt.Y*p.w+pt.X] = true
+	}
+	// Collect arm-tip exits from cluster: skeleton pixels adjacent to
+	// (but not inside) the cluster.
+	type seed struct {
+		x, y int
+	}
+	seeds := make([]seed, 0, 4)
+	seenSeed := make(map[int]bool)
+	for _, pt := range pix {
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				if dx == 0 && dy == 0 {
+					continue
+				}
+				nx, ny := pt.X+dx, pt.Y+dy
+				if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+					continue
+				}
+				nidx := ny*p.w + nx
+				if cluster[nidx] {
+					continue
+				}
+				if p.buf[nidx] <= 0 {
+					continue
+				}
+				if seenSeed[nidx] {
+					continue
+				}
+				seenSeed[nidx] = true
+				seeds = append(seeds, seed{nx, ny})
+			}
+		}
+	}
+	// Erase the cluster pixels themselves.
+	for _, pt := range pix {
+		p.buf[pt.Y*p.w+pt.X] = 0
+	}
+	// Walk each arm armErase pixels outward and erase. Stop early when
+	// the path branches (we only want to nibble back one strand).
+	for _, s := range seeds {
+		x, y := s.x, s.y
+		for step := 0; step < armErase; step++ {
+			if p.buf[y*p.w+x] <= 0 {
+				break
+			}
+			p.buf[y*p.w+x] = 0
+			// Find the next skeleton neighbor (there should be at most
+			// one once the cluster is erased; if more, we've hit a real
+			// junction and stop).
+			nextX, nextY := -1, -1
+			candidates := 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					if dx == 0 && dy == 0 {
+						continue
+					}
+					nx, ny := x+dx, y+dy
+					if nx < 0 || ny < 0 || nx >= p.w || ny >= p.h {
+						continue
+					}
+					if p.buf[ny*p.w+nx] > 0 {
+						nextX, nextY = nx, ny
+						candidates++
+					}
+				}
+			}
+			if candidates != 1 {
+				break
+			}
+			x, y = nextX, nextY
+		}
+	}
+	return true
 }
 
 // bfsShortestPath returns the shortest 8-connected skeleton path from
@@ -910,7 +1064,23 @@ func convertImage(img image.Image) (*Diagram, error) {
 	p.deleteSpurs()
 	clusters, unresolvable := findJunctionClusters(p)
 	if len(unresolvable) > 0 {
-		return nil, &FusedJunctionsError{Junctions: unresolvable}
+		// Try to recover: a 3-exit Y typically arises when a
+		// rendering artifact makes one strand graze another (so the
+		// expected gap collapsed). Erase the junction pixel and a
+		// short section of each arm, then re-thin so the resulting
+		// endpoints sit a few pixels apart — matchEndpoints can then
+		// bridge them across the over-strand like any other under-
+		// crossing. If the recovery doesn't help (for example a real
+		// degree-3 vertex), fall back to the existing error.
+		erased := relaxFusedJunctions(p, unresolvable)
+		if !erased {
+			return nil, &FusedJunctionsError{Junctions: unresolvable}
+		}
+		p.deleteSpurs()
+		clusters, unresolvable = findJunctionClusters(p)
+		if len(unresolvable) > 0 {
+			return nil, &FusedJunctionsError{Junctions: unresolvable}
+		}
 	}
 
 	thick := p.clone()
@@ -1103,9 +1273,31 @@ func convertImage(img image.Image) (*Diagram, error) {
 	}
 
 	adj := make([][]int, len(verts))
+	var bad []image.Point
 	for i, e := range edges {
+		if e.v1 == e.v2 {
+			bad = append(bad, verts[e.v1].toImage())
+		}
 		adj[e.v1] = append(adj[e.v1], i+1)
 		adj[e.v2] = append(adj[e.v2], -(i + 1))
+	}
+	if len(bad) > 0 {
+		return nil, &BadTopologyError{Locations: bad, Reason: "self-loop edge"}
+	}
+	// Validate degrees: the arc walker assumes every vertex is either an
+	// endpoint (1), a path point (2), or a 4-valent crossing. A vertex
+	// with any other degree means upstream produced a malformed graph
+	// (e.g. two match edges snapping to the same existing vertex), and
+	// the walker would loop forever bouncing between its darts.
+	for vi, list := range adj {
+		switch len(list) {
+		case 1, 2, 4:
+		default:
+			bad = append(bad, verts[vi].toImage())
+		}
+	}
+	if len(bad) > 0 {
+		return nil, &BadTopologyError{Locations: bad, Reason: "vertex degree not in {1,2,4}"}
 	}
 
 	crossOf := make(map[int]int)
