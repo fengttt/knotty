@@ -54,7 +54,26 @@ func binaryFromImage(img image.Image) *pixbuf {
 			if a < 0x8000 {
 				continue
 			}
-			if (r+g+bl)/3 < 0x8000 {
+			// A pixel is foreground if it is dark (knot diagrams in
+			// black on white) or saturated (link diagrams from
+			// katlas.org use magenta + blue strands on a transparent
+			// background — both are bright but heavily saturated).
+			dark := (r+g+bl)/3 < 0x8000
+			lo, hi := r, r
+			if g < lo {
+				lo = g
+			}
+			if bl < lo {
+				lo = bl
+			}
+			if g > hi {
+				hi = g
+			}
+			if bl > hi {
+				hi = bl
+			}
+			saturated := hi-lo > 0x8000
+			if dark || saturated {
 				p.buf[y*w+x] = 1
 			}
 		}

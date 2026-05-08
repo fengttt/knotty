@@ -668,13 +668,18 @@ func (g *game) buildBottomPane() *widget.Container {
 // doSearch handles the search button / Enter key. An empty query
 // clears the image, properties, and search box, and labels the name
 // as "Drawing" — a blank canvas state. Non-empty queries route by
-// first character: a digit (e.g. "3_1", "4_1") looks up the
-// KnotInfo row by name; a letter looks up a user-saved diagram in
-// the saved/ directory by file name (saved/<name>.png).
+// first character: capital "L" (e.g. "L2a1", "L11n459") loads a
+// Thistlethwaite-table link from dataset/links/; a digit (e.g. "3_1",
+// "4_1") looks up the KnotInfo row by name; any other letter looks up
+// a user-saved diagram in the saved/ directory.
 func (g *game) doSearch(q string) {
 	q = trim(q)
 	if q == "" {
 		g.enterDrawingMode()
+		return
+	}
+	if len(q) > 0 && q[0] == 'L' {
+		g.loadLink(q)
 		return
 	}
 	if len(q) > 0 && isLetter(q[0]) {
